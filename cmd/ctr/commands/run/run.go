@@ -209,7 +209,12 @@ var Command = cli.Command{
 			}
 		}
 		if enableCNI {
-			if _, err := network.Setup(ctx, fullID(ctx, container), fmt.Sprintf("/proc/%d/ns/net", task.Pid())); err != nil {
+			netNsPath, err := getNetNsPath(task)
+			if err != nil {
+				return err
+			}
+
+			if _, err := network.Setup(ctx, fullID(ctx, container), netNsPath); err != nil {
 				return err
 			}
 		}

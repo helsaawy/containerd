@@ -18,6 +18,7 @@ package run
 
 import (
 	gocontext "context"
+	"github.com/containerd/containerd/pkg/netns"
 
 	"github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
 	"github.com/containerd/console"
@@ -152,4 +153,13 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 
 func getNewTaskOpts(_ *cli.Context) []containerd.NewTaskOpts {
 	return nil
+}
+
+func getNetNsPath(_ containerd.Task) (string, error) {
+	ns, err := netns.NewNetNS("")
+	if err != nil {
+		return "", err
+	}
+
+	return ns.GetPath(), nil
 }
