@@ -35,6 +35,10 @@ var platformRunFlags = []cli.Flag{
 		Name:  "isolated",
 		Usage: "run the container with vm isolation",
 	},
+	cli.BoolFlag{
+		Name:  "cni",
+		Usage: "enable cni networking for the container",
+	},
 }
 
 // NewContainer creates a new container
