@@ -209,7 +209,7 @@ var Command = cli.Command{
 			}
 		}
 		if enableCNI {
-			netNsPath, err := getNetNsPath(task)
+			netNsPath, err := getNetNsPath(ctx, task)
 			if err != nil {
 				return err
 			}

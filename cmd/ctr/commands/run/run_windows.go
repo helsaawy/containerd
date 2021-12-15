@@ -18,6 +18,7 @@ package run
 
 import (
 	gocontext "context"
+
 	"github.com/containerd/containerd/pkg/netns"
 
 	"github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
@@ -121,6 +122,13 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 		if context.Bool("net-host") {
 			return nil, errors.New("Cannot use host mode networking with Windows containers")
 		}
+		if context.Bool("cni") {
+			ns, err := netns.NewNetNS("")
+			if err != nil {
+				return nil, err
+			}
+			opts = append(opts, oci.WithWindowsNetworkNamespace(ns.GetPath()))
+		}
 		if context.Bool("isolated") {
 			opts = append(opts, oci.WithWindowsHyperV)
 		}
@@ -155,11 +163,13 @@ func getNewTaskOpts(_ *cli.Context) []containerd.NewTaskOpts {
 	return nil
 }
 
-func getNetNsPath(_ containerd.Task) (string, error) {
-	ns, err := netns.NewNetNS("")
+func getNetNsPath(ctx gocontext.Context, t containerd.Task) (string, error) {
+	s, err := t.Spec(ctx)
 	if err != nil {
 		return "", err
 	}
-
-	return ns.GetPath(), nil
+	if s.Windows == nil || s.Windows.Network == nil {
+		return "", nil
+	}
+	return s.Windows.Network.NetworkNamespace, nil
 }

@@ -72,6 +72,20 @@ func WithHostDevices(_ context.Context, _ Client, _ *containers.Container, s *Sp
 	return nil
 }
 
+// WithWindowsNetworkNamespace sets the network namespace for a Windows container.
+func WithWindowsNetworkNamespace(ns string) SpecOpts {
+	return func(_ context.Context, _ Client, _ *containers.Container, s *Spec) error {
+		if s.Windows == nil {
+			s.Windows = &specs.Windows{}
+		}
+		if s.Windows.Network == nil {
+			s.Windows.Network = &specs.WindowsNetwork{}
+		}
+		s.Windows.Network.NetworkNamespace = ns
+		return nil
+	}
+}
+
 func deviceFromPath(path string) (*specs.LinuxDevice, error) {
 	return nil, errors.New("device from path not supported on Windows")
 }

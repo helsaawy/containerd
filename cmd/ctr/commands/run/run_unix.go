@@ -450,6 +450,6 @@ func validNamespace(ns string) bool {
 	}
 }
 
-func getNetNsPath(task containerd.Task) (string, error) {
+func getNetNsPath(_ gocontext.Context, task containerd.Task) (string, error) {
 	return fmt.Sprintf("/proc/%d/ns/net", task.Pid()), nil
 }
