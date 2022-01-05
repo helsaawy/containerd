@@ -37,15 +37,77 @@ import (
 )
 
 const (
-	inheritedLabelsPrefix = "containerd.io/snapshot/"
-	labelSnapshotRef      = "containerd.io/snapshot.ref"
+	inheritedLabelsPrefix  = "containerd.io/snapshot/"
+	labelSnapshotRef       = "containerd.io/snapshot.ref"
+	labelDisableSameUnpack = "containerd.io/snapshot/disable-same-unpack"
 )
+
+type inProgress struct {
+	entries sync.Map
+}
+
+func newInProgress() *inProgress {
+	return &inProgress{}
+}
+
+func (inp *inProgress) load(key string) (*broadCaster, bool) {
+	val, ok := inp.entries.Load(key)
+	if ok {
+		return val.(*broadCaster), true
+	}
+	return nil, false
+}
+
+func (inp *inProgress) loadOrStore(key string) (*broadCaster, bool) {
+	bc, ok := inp.entries.LoadOrStore(key, newBroadcaster())
+	return bc.(*broadCaster), ok
+}
+
+func (inp *inProgress) delete(key string) {
+	inp.entries.Delete(key)
+}
+
+type broadCaster struct {
+	c        *sync.Cond
+	finished bool
+	err      error
+}
+
+func newBroadcaster() *broadCaster {
+	return &broadCaster{
+		c: sync.NewCond(&sync.Mutex{}),
+	}
+}
+
+func (br *broadCaster) wait() error {
+	br.c.L.Lock()
+	defer br.c.L.Unlock()
+	// Check if the broadcaster has been "finished" which boils down to either us reaching `Commit` or `Remove`. It's a safeguard to protect
+	// a waiter getting into wait shortly after broadcast has been fired.
+	for !br.finished {
+		br.c.Wait()
+	}
+	return br.err
+}
+
+// broadcast invokes 'work' and then broadcasts to all waiters to wake up
+func (br *broadCaster) broadcast(work func()) {
+	br.c.L.Lock()
+	defer br.c.L.Unlock()
+
+	work()
+	// Alert all waiters.
+	br.c.Broadcast()
+}
 
 type snapshotter struct {
 	snapshots.Snapshotter
 	name string
 	db   *DB
 	l    sync.RWMutex
+	// inp holds all active extraction snapshots before becoming committed/removed. This can be used to wait on the
+	// result of an unpack instead of doing the same work twice if one is already underway.
+	inp *inProgress
 }
 
 // newSnapshotter returns a new Snapshotter which namespaces the given snapshot
@@ -55,6 +117,7 @@ func newSnapshotter(db *DB, name string, sn snapshots.Snapshotter) *snapshotter 
 		Snapshotter: sn,
 		name:        name,
 		db:          db,
+		inp:         newInProgress(),
 	}
 }
 
@@ -281,34 +344,67 @@ func (s *snapshotter) View(ctx context.Context, key, parent string, opts ...snap
 	return s.createSnapshot(ctx, key, parent, true, opts)
 }
 
-func (s *snapshotter) createSnapshot(ctx context.Context, key, parent string, readonly bool, opts []snapshots.Opt) ([]mount.Mount, error) {
+func (s *snapshotter) createSnapshot(ctx context.Context, key, parent string, readonly bool, opts []snapshots.Opt) (_ []mount.Mount, err error) {
 	s.l.RLock()
-	defer s.l.RUnlock()
 
 	ns, err := namespaces.NamespaceRequired(ctx)
 	if err != nil {
+		s.l.RUnlock()
 		return nil, err
 	}
 
 	var base snapshots.Info
 	for _, opt := range opts {
 		if err := opt(&base); err != nil {
+			s.l.RUnlock()
 			return nil, err
 		}
 	}
 
 	if err := validateSnapshot(&base); err != nil {
+		s.l.RUnlock()
 		return nil, err
 	}
 
 	var (
-		target  = base.Labels[labelSnapshotRef]
-		bparent string
-		bkey    string
-		bopts   = []snapshots.Opt{
+		target               = base.Labels[labelSnapshotRef]
+		_, disableSameUnpack = base.Labels[labelDisableSameUnpack]
+		bparent              string
+		bkey                 string
+		bopts                = []snapshots.Opt{
 			snapshots.WithLabels(snapshots.FilterInheritedLabels(base.Labels)),
 		}
 	)
+
+	if disableSameUnpack {
+		bc, ok := s.inp.loadOrStore(key)
+		if ok {
+			// Wait for someone to broadcast that an active snapshot with the same key was either committed or removed.
+			s.l.RUnlock()
+			err := bc.wait()
+			// If the extraction snapshot we were waiting on wasn't removed, then it either
+			// 1. Succeeded and we return ErrAlreadyExists as the unpacker special cases this error and will check if it can find the commited
+			// snapshot.
+			// 2. Failed and we return the error as is.
+			if err == nil {
+				return nil, errdefs.ErrAlreadyExists
+			}
+			return nil, err
+		} else {
+			// Else this is the first snapshot with this key, make sure to broadcast any errors if we
+			// error out in this call.
+			defer func() {
+				if err != nil {
+					bc.broadcast(func() {
+						bc.err = err
+						bc.finished = true
+						s.inp.delete(key)
+					})
+				}
+			}()
+		}
+	}
+	defer s.l.RUnlock()
 
 	if err := update(ctx, s.db, func(tx *bolt.Tx) error {
 		bkt, err := createSnapshotterBucket(tx, ns, s.name)
@@ -492,9 +588,22 @@ func (s *snapshotter) createSnapshot(ctx context.Context, key, parent string, re
 	return m, nil
 }
 
-func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) error {
+func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) (err error) {
 	s.l.RLock()
 	defer s.l.RUnlock()
+
+	defer func() {
+		bc, ok := s.inp.load(key)
+		if ok {
+			bc.broadcast(func() {
+				// Set the error that commit will return and then broadcast to all waiters that a commit has successfully
+				// completed/failed.
+				bc.finished = true
+				bc.err = err
+				s.inp.delete(key)
+			})
+		}
+	}()
 
 	ns, err := namespaces.NamespaceRequired(ctx)
 	if err != nil {
@@ -623,9 +732,24 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 
 }
 
-func (s *snapshotter) Remove(ctx context.Context, key string) error {
+func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 	s.l.RLock()
 	defer s.l.RUnlock()
+
+	defer func() {
+		// Broadcast to the waiters so we can return and try again. The unpacker logic special cases ErrAlreadyExists to handle remote
+		// snapshotters, but it makes sure that the snapshot actually does exist by statting the snapshot. If the stat fails, it will
+		// retry two more times. Whatever waiter ends up back in Prepare first will store the key and the others will go back to waiting
+		// until success/failure.
+		bc, ok := s.inp.load(key)
+		if ok {
+			bc.broadcast(func() {
+				bc.err = errdefs.ErrAlreadyExists
+				bc.finished = true
+				s.inp.delete(key)
+			})
+		}
+	}()
 
 	ns, err := namespaces.NamespaceRequired(ctx)
 	if err != nil {
