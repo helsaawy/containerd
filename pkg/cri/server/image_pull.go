@@ -1,48 +1,42 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/errdefs"
 	containerdimages "github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/labels"
 	"github.com/containerd/containerd/log"
-	distribution "github.com/containerd/containerd/reference/docker"
+	"github.com/containerd/containerd/reference"
+	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
-	"github.com/containerd/imgcrypt"
-	"github.com/containerd/imgcrypt/images/encryption"
+	distribution "github.com/docker/distribution/reference"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
-
-	criconfig "github.com/containerd/containerd/pkg/cri/config"
 )
 
 // For image management:
@@ -97,11 +91,12 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 	if ref != imageRef {
 		log.G(ctx).Debugf("PullImage using normalized image ref: %q", ref)
 	}
+	resolver, _, err := c.getResolver(ctx, ref, c.credentials(r.GetAuth()))
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to resolve image %q", ref)
+	}
+
 	var (
-		resolver = docker.NewResolver(docker.ResolverOptions{
-			Headers: c.config.Registry.Headers,
-			Hosts:   c.registryHosts(r.GetAuth()),
-		})
 		isSchema1    bool
 		imageHandler containerdimages.HandlerFunc = func(_ context.Context,
 			desc imagespec.Descriptor) ([]imagespec.Descriptor, error) {
@@ -115,14 +110,12 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 	pullOpts := []containerd.RemoteOpt{
 		containerd.WithSchema1Conversion,
 		containerd.WithResolver(resolver),
-		containerd.WithPullSnapshotter(c.config.ContainerdConfig.Snapshotter),
+		containerd.WithPullSnapshotter(c.getDefaultSnapshotterForSandbox(r.GetSandboxConfig())),
 		containerd.WithPullUnpack,
 		containerd.WithPullLabel(imageLabelKey, imageLabelValue),
-		containerd.WithMaxConcurrentDownloads(c.config.MaxConcurrentDownloads),
 		containerd.WithImageHandler(imageHandler),
 	}
 
-	pullOpts = append(pullOpts, c.encryptedImagesPullOpts()...)
 	if !c.config.ContainerdConfig.DisableSnapshotAnnotations {
 		pullOpts = append(pullOpts,
 			containerd.WithImageHandlerWrapper(appendInfoHandlerWrapper(ref)))
@@ -172,19 +165,9 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 }
 
 // ParseAuth parses AuthConfig and returns username and password/secret required by containerd.
-func ParseAuth(auth *runtime.AuthConfig, host string) (string, string, error) {
+func ParseAuth(auth *runtime.AuthConfig) (string, string, error) {
 	if auth == nil {
 		return "", "", nil
-	}
-	if auth.ServerAddress != "" {
-		// Do not return the auth info when server address doesn't match.
-		u, err := url.Parse(auth.ServerAddress)
-		if err != nil {
-			return "", "", errors.Wrap(err, "parse server address")
-		}
-		if host != u.Host {
-			return "", "", nil
-		}
 	}
 	if auth.Username != "" {
 		return auth.Username, auth.Password, nil
@@ -207,8 +190,7 @@ func ParseAuth(auth *runtime.AuthConfig, host string) (string, string, error) {
 		return user, strings.Trim(passwd, "\x00"), nil
 	}
 	// TODO(random-liu): Support RegistryToken.
-	// An empty auth config is valid for anonymous registry
-	return "", "", nil
+	return "", "", errors.New("invalid auth config")
 }
 
 // createImageReference creates image reference inside containerd image store.
@@ -270,195 +252,115 @@ func (c *criService) updateImage(ctx context.Context, r string) error {
 	return nil
 }
 
-// getTLSConfig returns a TLSConfig configured with a CA/Cert/Key specified by registryTLSConfig
-func (c *criService) getTLSConfig(registryTLSConfig criconfig.TLSConfig) (*tls.Config, error) {
-	var (
-		tlsConfig = &tls.Config{}
-		cert      tls.Certificate
-		err       error
-	)
-	if registryTLSConfig.CertFile != "" && registryTLSConfig.KeyFile == "" {
-		return nil, errors.Errorf("cert file %q was specified, but no corresponding key file was specified", registryTLSConfig.CertFile)
-	}
-	if registryTLSConfig.CertFile == "" && registryTLSConfig.KeyFile != "" {
-		return nil, errors.Errorf("key file %q was specified, but no corresponding cert file was specified", registryTLSConfig.KeyFile)
-	}
-	if registryTLSConfig.CertFile != "" && registryTLSConfig.KeyFile != "" {
-		cert, err = tls.LoadX509KeyPair(registryTLSConfig.CertFile, registryTLSConfig.KeyFile)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to load cert file")
-		}
-		if len(cert.Certificate) != 0 {
-			tlsConfig.Certificates = []tls.Certificate{cert}
-		}
-		tlsConfig.BuildNameToCertificate() // nolint:staticcheck
-	}
-
-	if registryTLSConfig.CAFile != "" {
-		caCertPool, err := x509.SystemCertPool()
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to get system cert pool")
-		}
-		caCert, err := ioutil.ReadFile(registryTLSConfig.CAFile)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to load CA file")
-		}
-		caCertPool.AppendCertsFromPEM(caCert)
-		tlsConfig.RootCAs = caCertPool
-	}
-
-	tlsConfig.InsecureSkipVerify = registryTLSConfig.InsecureSkipVerify
-	return tlsConfig, nil
-}
-
-// registryHosts is the registry hosts to be used by the resolver.
-func (c *criService) registryHosts(auth *runtime.AuthConfig) docker.RegistryHosts {
-	return func(host string) ([]docker.RegistryHost, error) {
-		var registries []docker.RegistryHost
-
-		endpoints, err := c.registryEndpoints(host)
-		if err != nil {
-			return nil, errors.Wrap(err, "get registry endpoints")
-		}
-		for _, e := range endpoints {
-			u, err := url.Parse(e)
-			if err != nil {
-				return nil, errors.Wrapf(err, "parse registry endpoint %q from mirrors", e)
-			}
-
-			var (
-				transport = newTransport()
-				client    = &http.Client{Transport: transport}
-				config    = c.config.Registry.Configs[u.Host]
-			)
-
-			if config.TLS != nil {
-				transport.TLSClientConfig, err = c.getTLSConfig(*config.TLS)
+// credentials returns a credential function for docker resolver to use.
+func (c *criService) credentials(auth *runtime.AuthConfig) func(string) (string, string, error) {
+	return func(host string) (string, string, error) {
+		if auth == nil {
+			// Get default auth from config.
+			for h, ac := range c.config.Registry.Auths {
+				u, err := url.Parse(h)
 				if err != nil {
-					return nil, errors.Wrapf(err, "get TLSConfig for registry %q", e)
+					return "", "", errors.Wrapf(err, "parse auth host %q", h)
+				}
+				if u.Host == host {
+					auth = toRuntimeAuthConfig(ac)
+					break
 				}
 			}
-
-			if auth == nil && config.Auth != nil {
-				auth = toRuntimeAuthConfig(*config.Auth)
-			}
-
-			if u.Path == "" {
-				u.Path = "/v2"
-			}
-
-			registries = append(registries, docker.RegistryHost{
-				Client: client,
-				Authorizer: docker.NewDockerAuthorizer(
-					docker.WithAuthClient(client),
-					docker.WithAuthCreds(func(host string) (string, string, error) {
-						return ParseAuth(auth, host)
-					})),
-				Host:         u.Host,
-				Scheme:       u.Scheme,
-				Path:         u.Path,
-				Capabilities: docker.HostCapabilityResolve | docker.HostCapabilityPull,
-			})
 		}
-		return registries, nil
+		return ParseAuth(auth)
 	}
 }
 
-// defaultScheme returns the default scheme for a registry host.
-func defaultScheme(host string) string {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		return "http"
-	}
-	return "https"
-}
-
-// addDefaultScheme returns the endpoint with default scheme
-func addDefaultScheme(endpoint string) (string, error) {
-	if strings.Contains(endpoint, "://") {
-		return endpoint, nil
-	}
-	ue := "dummy://" + endpoint
-	u, err := url.Parse(ue)
+// getResolver tries registry mirrors and the default registry, and returns the resolver and descriptor
+// from the first working registry.
+func (c *criService) getResolver(ctx context.Context, ref string, cred func(string) (string, string, error)) (remotes.Resolver, imagespec.Descriptor, error) {
+	refspec, err := reference.Parse(ref)
 	if err != nil {
-		return "", err
+		return nil, imagespec.Descriptor{}, errors.Wrap(err, "parse image reference")
 	}
-	return fmt.Sprintf("%s://%s", defaultScheme(u.Host), endpoint), nil
-}
-
-// registryEndpoints returns endpoints for a given host.
-// It adds default registry endpoint if it does not exist in the passed-in endpoint list.
-// It also supports wildcard host matching with `*`.
-func (c *criService) registryEndpoints(host string) ([]string, error) {
-	var endpoints []string
-	_, ok := c.config.Registry.Mirrors[host]
-	if ok {
-		endpoints = c.config.Registry.Mirrors[host].Endpoints
-	} else {
-		endpoints = c.config.Registry.Mirrors["*"].Endpoints
-	}
-	defaultHost, err := docker.DefaultHost(host)
-	if err != nil {
-		return nil, errors.Wrap(err, "get default host")
-	}
-	for i := range endpoints {
-		en, err := addDefaultScheme(endpoints[i])
-		if err != nil {
-			return nil, errors.Wrap(err, "parse endpoint url")
-		}
-		endpoints[i] = en
-	}
-	for _, e := range endpoints {
+	// Try mirrors in order first, and then try default host name.
+	for _, e := range c.config.Registry.Mirrors[refspec.Hostname()].Endpoints {
 		u, err := url.Parse(e)
 		if err != nil {
-			return nil, errors.Wrap(err, "parse endpoint url")
+			return nil, imagespec.Descriptor{}, errors.Wrapf(err, "parse registry endpoint %q", e)
 		}
-		if u.Host == host {
-			// Do not add default if the endpoint already exists.
-			return endpoints, nil
+		resolver := docker.NewResolver(docker.ResolverOptions{
+			Authorizer: docker.NewAuthorizer(http.DefaultClient, cred),
+			Client:     http.DefaultClient,
+			Host:       func(string) (string, error) { return u.Host, nil },
+			// By default use "https".
+			PlainHTTP: u.Scheme == "http",
+		})
+		_, desc, err := resolver.Resolve(ctx, ref)
+		if err == nil {
+			return resolver, desc, nil
 		}
+		// Continue to try next endpoint
 	}
-	return append(endpoints, defaultScheme(defaultHost)+"://"+defaultHost), nil
+	client := &http.Client{
+		CheckRedirect: checkRedirecter(ctx),
+	}
+	resolver := docker.NewResolver(docker.ResolverOptions{
+		Credentials: cred,
+		Client:      client,
+	})
+	_, desc, err := resolver.Resolve(ctx, ref)
+	if err != nil {
+		return nil, imagespec.Descriptor{}, errors.Wrap(err, "no available registry endpoint")
+	}
+	return resolver, desc, nil
 }
 
-// newTransport returns a new HTTP transport used to pull image.
-// TODO(random-liu): Create a library and share this code with `ctr`.
-func newTransport() *http.Transport {
-	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:       30 * time.Second,
-			KeepAlive:     30 * time.Second,
-			FallbackDelay: 300 * time.Millisecond,
-		}).DialContext,
-		MaxIdleConns:          10,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 5 * time.Second,
+// TODO: JTERRY75 set these by using the containerd/containerd/remotes/docker
+// resolver and add an opt to set the ClientRedirect.
+func checkRedirecter(ctx context.Context) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		log.G(ctx).WithFields(requestFields(req)).Debug("do request redirect")
+		for i, v := range via {
+			log.G(ctx).WithFields(requestFields(v)).Debugf("do request redirect via %d", i)
+		}
+		return nil
 	}
 }
 
-// encryptedImagesPullOpts returns the necessary list of pull options required
-// for decryption of encrypted images based on the cri decryption configuration.
-func (c *criService) encryptedImagesPullOpts() []containerd.RemoteOpt {
-	if c.config.ImageDecryption.KeyModel == criconfig.KeyModelNode {
-		ltdd := imgcrypt.Payload{}
-		decUnpackOpt := encryption.WithUnpackConfigApplyOpts(encryption.WithDecryptedUnpack(&ltdd))
-		opt := containerd.WithUnpackOpts([]containerd.UnpackOpt{decUnpackOpt})
-		return []containerd.RemoteOpt{opt}
+func requestFields(req *http.Request) logrus.Fields {
+	fields := map[string]interface{}{
+		"request.method": req.Method,
 	}
-	return nil
+	if req.URL != nil {
+		fields["url"] = req.URL.String()
+	}
+	for k, vals := range req.Header {
+		k = strings.ToLower(k)
+		if k == "authorization" {
+			continue
+		}
+		for i, v := range vals {
+			field := "request.header." + k
+			if i > 0 {
+				field = fmt.Sprintf("%s.%d", field, i)
+			}
+			fields[field] = v
+		}
+	}
+
+	return logrus.Fields(fields)
 }
 
 const (
 	// targetRefLabel is a label which contains image reference and will be passed
 	// to snapshotters.
 	targetRefLabel = "containerd.io/snapshot/cri.image-ref"
-	// targetDigestLabel is a label which contains layer digest and will be passed
+	// targetManifestDigestLabel is a label which contains manifest digest and will be passed
 	// to snapshotters.
-	targetDigestLabel = "containerd.io/snapshot/cri.layer-digest"
+	targetManifestDigestLabel = "containerd.io/snapshot/cri.manifest-digest"
+	// targetLayerDigestLabel is a label which contains layer digest and will be passed
+	// to snapshotters.
+	targetLayerDigestLabel = "containerd.io/snapshot/cri.layer-digest"
 	// targetImageLayersLabel is a label which contains layer digests contained in
 	// the target image and will be passed to snapshotters for preparing layers in
 	// parallel. Skipping some layers is allowed and only affects performance.
@@ -466,8 +368,8 @@ const (
 )
 
 // appendInfoHandlerWrapper makes a handler which appends some basic information
-// of images to each layer descriptor as annotations during unpack. These
-// annotations will be passed to snapshotters as labels. These labels will be
+// of images like digests for manifest and their child layers as annotations during unpack.
+// These annotations will be passed to snapshotters as labels. These labels will be
 // used mainly by stargz-based snapshotters for querying image contents from the
 // registry.
 func appendInfoHandlerWrapper(ref string) func(f containerdimages.Handler) containerdimages.Handler {
@@ -486,8 +388,9 @@ func appendInfoHandlerWrapper(ref string) func(f containerdimages.Handler) conta
 							c.Annotations = make(map[string]string)
 						}
 						c.Annotations[targetRefLabel] = ref
-						c.Annotations[targetDigestLabel] = c.Digest.String()
+						c.Annotations[targetLayerDigestLabel] = c.Digest.String()
 						c.Annotations[targetImageLayersLabel] = getLayers(ctx, targetImageLayersLabel, children[i:], labels.Validate)
+						c.Annotations[targetManifestDigestLabel] = desc.Digest.String()
 					}
 				}
 			}

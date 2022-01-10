@@ -1,17 +1,17 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
@@ -23,12 +23,13 @@ import (
 	eventtypes "github.com/containerd/containerd/api/events"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
+	cni "github.com/containerd/go-cni"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
-	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
+	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
+	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
 )
 
 // StopPodSandbox stops the sandbox. If there are any running containers in the
@@ -66,8 +67,8 @@ func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sa
 		}
 	}
 
-	if err := c.cleanupSandboxFiles(id, sandbox.Config); err != nil {
-		return errors.Wrap(err, "failed to cleanup sandbox files")
+	if err := c.unmountSandboxFiles(id, sandbox.Config); err != nil {
+		return errors.Wrap(err, "failed to unmount sandbox files")
 	}
 
 	// Only stop sandbox container when it's running or unknown.
@@ -78,26 +79,7 @@ func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sa
 		}
 	}
 
-	// Teardown network for sandbox.
-	if sandbox.NetNS != nil {
-		// Use empty netns path if netns is not available. This is defined in:
-		// https://github.com/containernetworking/cni/blob/v0.7.0-alpha1/SPEC.md
-		if closed, err := sandbox.NetNS.Closed(); err != nil {
-			return errors.Wrap(err, "failed to check network namespace closed")
-		} else if closed {
-			sandbox.NetNSPath = ""
-		}
-		if err := c.teardownPodNetwork(ctx, sandbox); err != nil {
-			return errors.Wrapf(err, "failed to destroy network for sandbox %q", id)
-		}
-		if err := sandbox.NetNS.Remove(); err != nil {
-			return errors.Wrapf(err, "failed to remove network namespace for sandbox %q", id)
-		}
-	}
-
-	log.G(ctx).Infof("TearDown network for sandbox %q successfully", id)
-
-	return nil
+	return c.doStopPodSandbox(ctx, id, sandbox)
 }
 
 // stopSandboxContainer kills the sandbox container.
@@ -113,7 +95,15 @@ func (c *criService) stopSandboxContainer(ctx context.Context, sandbox sandboxst
 			return errors.Wrap(err, "failed to get sandbox container")
 		}
 		// Don't return for unknown state, some cleanup needs to be done.
-		if state == sandboxstore.StateUnknown {
+		if state == sandboxstore.StateUnknown || state == sandboxstore.StateReady {
+			// For the StateReady case we've somehow ended up in a state where the task is gone but the sandbox is still in a
+			// ready state. If the task exit event was missed from events.handleSandboxExit this is the likely culprit but a repro of
+			// this is hard to pull off. Even in the event of a shim crash task.Wait would return and update the status,
+			// so if this condition is hit it's a myriad of strange behavior probably related to containerd restart quirks.
+			// Simply reuse the logic if the state is unknown to update the status to NotReady so remove goes smoothly.
+			if state == sandboxstore.StateReady {
+				log.G(ctx).Warn("Sandbox container state is `Ready` but the task can't be found for the container")
+			}
 			return cleanupUnknownSandbox(ctx, id, sandbox)
 		}
 		return nil
@@ -163,23 +153,18 @@ func (c *criService) waitSandboxStop(ctx context.Context, sandbox sandboxstore.S
 	}
 }
 
-// teardownPodNetwork removes the network from the pod
-func (c *criService) teardownPodNetwork(ctx context.Context, sandbox sandboxstore.Sandbox) error {
+// teardownPod removes the network from the pod
+func (c *criService) teardownPod(id string, path string, config *runtime.PodSandboxConfig) error {
 	if c.netPlugin == nil {
 		return errors.New("cni config not initialized")
 	}
 
-	var (
-		id     = sandbox.ID
-		path   = sandbox.NetNSPath
-		config = sandbox.Config
-	)
-	opts, err := cniNamespaceOpts(id, config)
-	if err != nil {
-		return errors.Wrap(err, "get cni namespace options")
-	}
-
-	return c.netPlugin.Remove(ctx, id, path, opts...)
+	labels := getPodCNILabels(id, config)
+	return c.netPlugin.Remove(id,
+		path,
+		cni.WithLabels(labels),
+		cni.WithCapabilityPortMap(toCNIPortMappings(config.GetPortMappings())),
+		cni.WithCapability("dns", toCNIDNS(config.GetDnsConfig())))
 }
 
 // cleanupUnknownSandbox cleanup stopped sandbox in unknown state.

@@ -1,17 +1,17 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2018 The containerd Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
@@ -28,8 +28,8 @@ import (
 	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	criconfig "github.com/containerd/containerd/pkg/cri/config"
-	servertesting "github.com/containerd/containerd/pkg/cri/server/testing"
+	criconfig "github.com/containerd/cri/pkg/config"
+	servertesting "github.com/containerd/cri/pkg/server/testing"
 )
 
 func TestUpdateRuntimeConfig(t *testing.T) {
@@ -45,13 +45,14 @@ func TestUpdateRuntimeConfig(t *testing.T) {
 		"ipam": {
 			"type": "host-local",
 			"subnet": "{{.PodCIDR}}",
-			"ranges": [{{range $i, $range := .PodCIDRRanges}}{{if $i}}, {{end}}[{"subnet": "{{$range}}"}]{{end}}],
-			"routes": [{{range $i, $route := .Routes}}{{if $i}}, {{end}}{"dst": "{{$route}}"}{{end}}]
+			"routes": [
+			{"dst": "0.0.0.0/0"}
+			]
 		}
 	},
 	]
 }`
-		testCIDR = "10.0.0.0/24, 2001:4860:4860::/64"
+		testCIDR = "10.0.0.0/24"
 		expected = `
 {
 	"name": "test-pod-network",
@@ -63,8 +64,9 @@ func TestUpdateRuntimeConfig(t *testing.T) {
 		"ipam": {
 			"type": "host-local",
 			"subnet": "10.0.0.0/24",
-			"ranges": [[{"subnet": "10.0.0.0/24"}], [{"subnet": "2001:4860:4860::/64"}]],
-			"routes": [{"dst": "0.0.0.0/0"}, {"dst": "::/0"}]
+			"routes": [
+			{"dst": "0.0.0.0/0"}
+			]
 		}
 	},
 	]

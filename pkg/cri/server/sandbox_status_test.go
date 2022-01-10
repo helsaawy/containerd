@@ -1,17 +1,17 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
+	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
 )
 
 func TestPodSandboxStatus(t *testing.T) {
@@ -31,7 +31,6 @@ func TestPodSandboxStatus(t *testing.T) {
 		id = "test-id"
 		ip = "10.10.10.10"
 	)
-	additionalIPs := []string{"8.8.8.8", "2001:db8:85a3::8a2e:370:7334"}
 	createdAt := time.Now()
 	config := &runtime.PodSandboxConfig{
 		Metadata: &runtime.PodSandboxMetadata{
@@ -63,17 +62,7 @@ func TestPodSandboxStatus(t *testing.T) {
 		Id:        id,
 		Metadata:  config.GetMetadata(),
 		CreatedAt: createdAt.UnixNano(),
-		Network: &runtime.PodSandboxNetworkStatus{
-			Ip: ip,
-			AdditionalIps: []*runtime.PodIP{
-				{
-					Ip: additionalIPs[0],
-				},
-				{
-					Ip: additionalIPs[1],
-				},
-			},
-		},
+		Network:   &runtime.PodSandboxNetworkStatus{Ip: ip},
 		Linux: &runtime.LinuxPodSandboxStatus{
 			Namespaces: &runtime.Namespace{
 				Options: &runtime.NamespaceOption{
@@ -110,7 +99,7 @@ func TestPodSandboxStatus(t *testing.T) {
 			State:     test.state,
 		}
 		expected.State = test.expectedState
-		got := toCRISandboxStatus(metadata, status, ip, additionalIPs)
+		got := toCRISandboxStatus(metadata, status, ip)
 		assert.Equal(t, expected, got)
 	}
 }

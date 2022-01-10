@@ -1,57 +1,58 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	osruntime "runtime"
 	"time"
 
 	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/oci"
-	"github.com/containerd/containerd/pkg/cri/streaming"
+	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plugin"
 	cni "github.com/containerd/go-cni"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
+	"k8s.io/kubernetes/pkg/kubelet/server/streaming"
 
-	"github.com/containerd/containerd/pkg/cri/store/label"
-
-	"github.com/containerd/containerd/pkg/atomic"
-	criconfig "github.com/containerd/containerd/pkg/cri/config"
-	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
-	imagestore "github.com/containerd/containerd/pkg/cri/store/image"
-	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
-	snapshotstore "github.com/containerd/containerd/pkg/cri/store/snapshot"
-	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
-	osinterface "github.com/containerd/containerd/pkg/os"
-	"github.com/containerd/containerd/pkg/registrar"
+	api "github.com/containerd/cri/pkg/api/v1"
+	"github.com/containerd/cri/pkg/atomic"
+	criconfig "github.com/containerd/cri/pkg/config"
+	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
+	osinterface "github.com/containerd/cri/pkg/os"
+	"github.com/containerd/cri/pkg/registrar"
+	containerstore "github.com/containerd/cri/pkg/store/container"
+	imagestore "github.com/containerd/cri/pkg/store/image"
+	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
+	snapshotstore "github.com/containerd/cri/pkg/store/snapshot"
 )
 
 // grpcServices are all the grpc services provided by cri containerd.
 type grpcServices interface {
 	runtime.RuntimeServiceServer
 	runtime.ImageServiceServer
+	api.CRIPluginServiceServer
 }
 
 // CRIService is the interface implement CRI remote service server.
@@ -69,6 +70,10 @@ type criService struct {
 	config criconfig.Config
 	// imageFSPath is the path to image filesystem.
 	imageFSPath string
+	// apparmorEnabled indicates whether apparmor is enabled.
+	apparmorEnabled bool
+	// seccompEnabled indicates whether seccomp is enabled.
+	seccompEnabled bool
 	// os is an interface for all required os operations.
 	os osinterface.OS
 	// sandboxStore stores all resources associated with sandboxes.
@@ -96,29 +101,38 @@ type criService struct {
 	// initialized indicates whether the server is initialized. All GRPC services
 	// should return error before the server is initialized.
 	initialized atomic.Bool
-	// cniNetConfMonitor is used to reload cni network conf if there is
-	// any valid fs change events from cni network conf dir.
-	cniNetConfMonitor *cniNetConfSyncer
-	// baseOCISpecs contains cached OCI specs loaded via `Runtime.BaseRuntimeSpec`
-	baseOCISpecs map[string]*oci.Spec
 }
 
 // NewCRIService returns a new instance of CRIService
 func NewCRIService(config criconfig.Config, client *containerd.Client) (CRIService, error) {
 	var err error
-	labels := label.NewStore()
 	c := &criService{
 		config:             config,
 		client:             client,
 		os:                 osinterface.RealOS{},
-		sandboxStore:       sandboxstore.NewStore(labels),
-		containerStore:     containerstore.NewStore(labels),
+		sandboxStore:       sandboxstore.NewStore(),
+		containerStore:     containerstore.NewStore(),
 		imageStore:         imagestore.NewStore(client),
 		snapshotStore:      snapshotstore.NewStore(),
 		sandboxNameIndex:   registrar.NewRegistrar(),
 		containerNameIndex: registrar.NewRegistrar(),
 		initialized:        atomic.NewBool(false),
 	}
+
+	if c.config.DisableHTTP2Client {
+		env := "http2client=0"
+		if current := os.Getenv("GODEBUG"); current != "" {
+			env = current + "," + env
+		}
+		if err := os.Setenv("GODEBUG", env); err != nil {
+			return nil, errors.Wrap(err, "failed to set GODEBUG environment variable")
+		}
+	}
+
+	c.apparmorEnabled = isApparmorEnabled() && !config.DisableApparmor
+	c.seccompEnabled = isSeccompEnabled()
+	doRunningInUserNSCheck(config.DisableCgroup, c.apparmorEnabled, config.RestrictOOMScoreAdj)
+	doSelinux(c.config.EnableSelinux)
 
 	if client.SnapshotService(c.config.ContainerdConfig.Snapshotter) == nil {
 		return nil, errors.Errorf("failed to find snapshotter %q", c.config.ContainerdConfig.Snapshotter)
@@ -127,28 +141,42 @@ func NewCRIService(config criconfig.Config, client *containerd.Client) (CRIServi
 	c.imageFSPath = imageFSPath(config.ContainerdRootDir, config.ContainerdConfig.Snapshotter)
 	logrus.Infof("Get image filesystem path %q", c.imageFSPath)
 
-	if err := c.initPlatform(); err != nil {
-		return nil, errors.Wrap(err, "initialize platform")
+	// Pod needs to attach to atleast loopback network and a non host network,
+	// hence networkAttachCount is 2. If there are more network configs the
+	// pod will be attached to all the networks but we will only use the ip
+	// of the default network interface as the pod IP.
+	numberOfNetworks := networkAttachCount
+	if osruntime.GOOS == "windows" {
+		// For windows, the loopback network is added as default.
+		// There is no need to explicitly add one
+		numberOfNetworks = windowsNetworkAttachCount
+	}
+
+	c.netPlugin, err = cni.New(cni.WithMinNetworkCount(numberOfNetworks),
+		cni.WithPluginConfDir(config.NetworkPluginConfDir),
+		cni.WithPluginDir([]string{config.NetworkPluginBinDir}))
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to initialize cni")
+	}
+
+	// Try to load the config if it exists. Just log the error if load fails
+	// This is not disruptive for containerd to panic
+	var copts []cni.CNIOpt
+	if osruntime.GOOS != "windows" {
+		copts = append(copts, cni.WithLoNetwork)
+	}
+	copts = append(copts, cni.WithDefaultConf)
+	if err := c.netPlugin.Load(copts...); err != nil {
+		logrus.WithError(err).Error("Failed to load cni during init, please check CRI plugin status before setting up network for pods")
 	}
 
 	// prepare streaming server
-	c.streamServer, err = newStreamServer(c, config.StreamServerAddress, config.StreamServerPort, config.StreamIdleTimeout)
+	c.streamServer, err = newStreamServer(c, config.StreamServerAddress, config.StreamServerPort)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create stream server")
 	}
 
 	c.eventMonitor = newEventMonitor(c)
-
-	c.cniNetConfMonitor, err = newCNINetConfSyncer(c.config.NetworkPluginConfDir, c.netPlugin, c.cniLoadOptions())
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create cni conf monitor")
-	}
-
-	// Preload base OCI specs
-	c.baseOCISpecs, err = loadBaseOCISpecs(&config)
-	if err != nil {
-		return nil, err
-	}
 
 	return c, nil
 }
@@ -156,15 +184,10 @@ func NewCRIService(config criconfig.Config, client *containerd.Client) (CRIServi
 // Register registers all required services onto a specific grpc server.
 // This is used by containerd cri plugin.
 func (c *criService) Register(s *grpc.Server) error {
-	return c.register(s)
-}
-
-// RegisterTCP register all required services onto a GRPC server on TCP.
-// This is used by containerd CRI plugin.
-func (c *criService) RegisterTCP(s *grpc.Server) error {
-	if !c.config.DisableTCPService {
-		return c.register(s)
-	}
+	instrumented := newInstrumentedService(c)
+	runtime.RegisterRuntimeServiceServer(s, instrumented)
+	runtime.RegisterImageServiceServer(s, instrumented)
+	api.RegisterCRIPluginServiceServer(s, instrumented)
 	return nil
 }
 
@@ -191,14 +214,6 @@ func (c *criService) Run() error {
 	)
 	snapshotsSyncer.start()
 
-	// Start CNI network conf syncer
-	logrus.Info("Start cni network conf syncer")
-	cniNetConfMonitorErrCh := make(chan error, 1)
-	go func() {
-		defer close(cniNetConfMonitorErrCh)
-		cniNetConfMonitorErrCh <- c.cniNetConfMonitor.syncLoop()
-	}()
-
 	// Start streaming server.
 	logrus.Info("Start streaming server")
 	streamServerErrCh := make(chan error)
@@ -213,12 +228,11 @@ func (c *criService) Run() error {
 	// Set the server as initialized. GRPC services could start serving traffic.
 	c.initialized.Set()
 
-	var eventMonitorErr, streamServerErr, cniNetConfMonitorErr error
+	var eventMonitorErr, streamServerErr error
 	// Stop the whole CRI service if any of the critical service exits.
 	select {
 	case eventMonitorErr = <-eventMonitorErrCh:
 	case streamServerErr = <-streamServerErrCh:
-	case cniNetConfMonitorErr = <-cniNetConfMonitorErrCh:
 	}
 	if err := c.Close(); err != nil {
 		return errors.Wrap(err, "failed to stop cri service")
@@ -253,9 +267,6 @@ func (c *criService) Run() error {
 	if streamServerErr != nil {
 		return errors.Wrap(streamServerErr, "stream server error")
 	}
-	if cniNetConfMonitorErr != nil {
-		return errors.Wrap(cniNetConfMonitorErr, "cni network conf monitor error")
-	}
 	return nil
 }
 
@@ -263,8 +274,14 @@ func (c *criService) Run() error {
 // TODO(random-liu): Make close synchronous.
 func (c *criService) Close() error {
 	logrus.Info("Stop CRI service")
-	if err := c.cniNetConfMonitor.stop(); err != nil {
-		logrus.WithError(err).Error("failed to stop cni network conf monitor")
+	if c.config.TerminateContainersOnRestart {
+		// We need to stop any running containers. Do this by stopping all pods.
+		ctx := context.Background()
+		for _, sandbox := range c.sandboxStore.List() {
+			if err := c.stopPodSandbox(ctx, sandbox); err != nil {
+				log.G(ctx).WithField("sandboxID", sandbox.Metadata.ID).Error("Failed to stop sandbox on shutdown")
+			}
+		}
 	}
 	c.eventMonitor.stop()
 	if err := c.streamServer.Stop(); err != nil {
@@ -273,53 +290,8 @@ func (c *criService) Close() error {
 	return nil
 }
 
-func (c *criService) register(s *grpc.Server) error {
-	instrumented := newInstrumentedService(c)
-	runtime.RegisterRuntimeServiceServer(s, instrumented)
-	runtime.RegisterImageServiceServer(s, instrumented)
-	return nil
-}
-
 // imageFSPath returns containerd image filesystem path.
 // Note that if containerd changes directory layout, we also needs to change this.
 func imageFSPath(rootDir, snapshotter string) string {
 	return filepath.Join(rootDir, fmt.Sprintf("%s.%s", plugin.SnapshotPlugin, snapshotter))
-}
-
-func loadOCISpec(filename string) (*oci.Spec, error) {
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to open base OCI spec: %s", filename)
-	}
-	defer file.Close()
-
-	spec := oci.Spec{}
-	if err := json.NewDecoder(file).Decode(&spec); err != nil {
-		return nil, errors.Wrap(err, "failed to parse base OCI spec file")
-	}
-
-	return &spec, nil
-}
-
-func loadBaseOCISpecs(config *criconfig.Config) (map[string]*oci.Spec, error) {
-	specs := map[string]*oci.Spec{}
-	for _, cfg := range config.Runtimes {
-		if cfg.BaseRuntimeSpec == "" {
-			continue
-		}
-
-		// Don't load same file twice
-		if _, ok := specs[cfg.BaseRuntimeSpec]; ok {
-			continue
-		}
-
-		spec, err := loadOCISpec(cfg.BaseRuntimeSpec)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to load base OCI spec from file: %s", cfg.BaseRuntimeSpec)
-		}
-
-		specs[cfg.BaseRuntimeSpec] = spec
-	}
-
-	return specs, nil
 }

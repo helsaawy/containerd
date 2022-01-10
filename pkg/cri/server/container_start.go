@@ -1,41 +1,40 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
 
 import (
 	"io"
+	"net/url"
 	"time"
 
 	"github.com/containerd/containerd"
 	containerdio "github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
-	"github.com/containerd/nri"
-	v1 "github.com/containerd/nri/types/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	cio "github.com/containerd/containerd/pkg/cri/io"
-	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
-	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
-	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
-	cioutil "github.com/containerd/containerd/pkg/ioutil"
+	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
+	cioutil "github.com/containerd/cri/pkg/ioutil"
+	cio "github.com/containerd/cri/pkg/server/io"
+	containerstore "github.com/containerd/cri/pkg/store/container"
+	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
 )
 
 // StartContainer starts the container.
@@ -99,7 +98,11 @@ func (c *criService) StartContainer(ctx context.Context, r *runtime.StartContain
 		return nil, errors.Wrap(err, "failed to get container info")
 	}
 
-	taskOpts := c.taskOpts(ctrInfo.Runtime.Name)
+	var taskOpts []containerd.NewTaskOpts
+	// TODO(random-liu): Remove this after shim v1 is deprecated.
+	if c.config.NoPivot && ctrInfo.Runtime.Name == linuxRuntime {
+		taskOpts = addOptWithNoPivotRoot(taskOpts)
+	}
 	task, err := container.NewTask(ctx, ioCreation, taskOpts...)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create containerd task")
@@ -109,7 +112,7 @@ func (c *criService) StartContainer(ctx context.Context, r *runtime.StartContain
 			deferCtx, deferCancel := ctrdutil.DeferContext()
 			defer deferCancel()
 			// It's possible that task is deleted by event monitor.
-			if _, err := task.Delete(deferCtx, WithNRISandboxDelete(sandboxID), containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
+			if _, err := task.Delete(deferCtx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
 				log.G(ctx).WithError(err).Errorf("Failed to delete containerd task %q", id)
 			}
 		}
@@ -119,19 +122,6 @@ func (c *criService) StartContainer(ctx context.Context, r *runtime.StartContain
 	exitCh, err := task.Wait(ctrdutil.NamespacedContext())
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to wait for containerd task")
-	}
-	nric, err := nri.New()
-	if err != nil {
-		log.G(ctx).WithError(err).Error("unable to create nri client")
-	}
-	if nric != nil {
-		nriSB := &nri.Sandbox{
-			ID:     sandboxID,
-			Labels: sandbox.Config.Labels,
-		}
-		if _, err := nric.InvokeWithSandbox(ctx, task, v1.Create, nriSB); err != nil {
-			return nil, errors.Wrap(err, "nri invoke")
-		}
 	}
 
 	// Start containerd task.
@@ -187,9 +177,13 @@ func resetContainerStarting(container containerstore.Container) error {
 
 // createContainerLoggers creates container loggers and return write closer for stdout and stderr.
 func (c *criService) createContainerLoggers(logPath string, tty bool) (stdout io.WriteCloser, stderr io.WriteCloser, err error) {
-	if logPath != "" {
-		// Only generate container log when log path is specified.
-		f, err := openLogFile(logPath)
+	u, err := url.Parse(logPath)
+	// logPath still can be an absolute path like: "C:\\path\\to\\log\\file.txt"
+	if logPath == "" || (err == nil && u.Scheme == "binary") {
+		stdout, stderr = cio.NewDiscardLogger(), cio.NewDiscardLogger()
+	} else {
+		// Only generate container log when log path is specified and it does not contain a "binary" URL scheme
+		f, err := openContainerOutputFile(logPath)
 		if err != nil {
 			return nil, nil, errors.Wrap(err, "failed to create and open log file")
 		}
@@ -215,9 +209,6 @@ func (c *criService) createContainerLoggers(logPath string, tty bool) (stdout io
 			logrus.Debugf("Finish redirecting log file %q, closing it", logPath)
 			f.Close()
 		}()
-	} else {
-		stdout = cio.NewDiscardLogger()
-		stderr = cio.NewDiscardLogger()
 	}
 	return
 }

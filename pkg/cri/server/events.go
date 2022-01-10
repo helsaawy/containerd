@@ -1,17 +1,17 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
@@ -32,11 +32,11 @@ import (
 	"golang.org/x/net/context"
 	"k8s.io/apimachinery/pkg/util/clock"
 
-	"github.com/containerd/containerd/pkg/cri/constants"
-	"github.com/containerd/containerd/pkg/cri/store"
-	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
-	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
-	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
+	"github.com/containerd/cri/pkg/constants"
+	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
+	"github.com/containerd/cri/pkg/store"
+	containerstore "github.com/containerd/cri/pkg/store/container"
+	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
 )
 
 const (
@@ -317,7 +317,7 @@ func handleContainerExit(ctx context.Context, e *eventtypes.TaskExit, cntr conta
 		}
 	} else {
 		// TODO(random-liu): [P1] This may block the loop, we may want to spawn a worker
-		if _, err = task.Delete(ctx, WithNRISandboxDelete(cntr.SandboxID), containerd.WithProcessKill); err != nil {
+		if _, err = task.Delete(ctx, containerd.WithProcessKill); err != nil {
 			if !errdefs.IsNotFound(err) {
 				return errors.Wrap(err, "failed to stop container")
 			}
@@ -333,12 +333,6 @@ func handleContainerExit(ctx context.Context, e *eventtypes.TaskExit, cntr conta
 		status.Pid = 0
 		status.FinishedAt = e.ExitedAt.UnixNano()
 		status.ExitCode = int32(e.ExitStatus)
-		// Unknown state can only transit to EXITED state, so we need
-		// to handle unknown state here.
-		if status.Unknown {
-			logrus.Debugf("Container %q transited from UNKNOWN to EXITED", cntr.ID)
-			status.Unknown = false
-		}
 		return status, nil
 	})
 	if err != nil {
@@ -359,7 +353,7 @@ func handleSandboxExit(ctx context.Context, e *eventtypes.TaskExit, sb sandboxst
 		}
 	} else {
 		// TODO(random-liu): [P1] This may block the loop, we may want to spawn a worker
-		if _, err = task.Delete(ctx, WithNRISandboxDelete(sb.ID), containerd.WithProcessKill); err != nil {
+		if _, err = task.Delete(ctx, containerd.WithProcessKill); err != nil {
 			if !errdefs.IsNotFound(err) {
 				return errors.Wrap(err, "failed to stop sandbox")
 			}

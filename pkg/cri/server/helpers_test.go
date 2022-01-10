@@ -1,40 +1,38 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
 
 import (
-	"context"
-	"io/ioutil"
+	"sort"
 	"testing"
 
 	"github.com/BurntSushi/toml"
-	"github.com/containerd/containerd/oci"
-	"github.com/containerd/containerd/plugin"
-	"github.com/containerd/containerd/reference/docker"
 	"github.com/containerd/containerd/runtime/linux/runctypes"
 	runcoptions "github.com/containerd/containerd/runtime/v2/runc/options"
+	"github.com/docker/distribution/reference"
 	imagedigest "github.com/opencontainers/go-digest"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	criconfig "github.com/containerd/containerd/pkg/cri/config"
-	"github.com/containerd/containerd/pkg/cri/store"
-	imagestore "github.com/containerd/containerd/pkg/cri/store/image"
+	criconfig "github.com/containerd/cri/pkg/config"
+	"github.com/containerd/cri/pkg/store"
+	imagestore "github.com/containerd/cri/pkg/store/image"
 )
 
 // TestGetUserFromImage tests the logic of getting image uid or user name of image user.
@@ -107,11 +105,35 @@ func TestGetRepoDigestAndTag(t *testing.T) {
 		},
 	} {
 		t.Logf("TestCase %q", desc)
-		named, err := docker.ParseDockerRef(test.ref)
+		named, err := reference.ParseDockerRef(test.ref)
 		assert.NoError(t, err)
 		repoDigest, repoTag := getRepoDigestAndTag(named, digest, test.schema1)
 		assert.Equal(t, test.expectedRepoDigest, repoDigest)
 		assert.Equal(t, test.expectedRepoTag, repoTag)
+	}
+}
+
+func TestGetCgroupsPath(t *testing.T) {
+	testID := "test-id"
+	for desc, test := range map[string]struct {
+		cgroupsParent string
+		systemdCgroup bool
+		expected      string
+	}{
+		"should support regular cgroup path": {
+			cgroupsParent: "/a/b",
+			systemdCgroup: false,
+			expected:      "/a/b/test-id",
+		},
+		"should support systemd cgroup path": {
+			cgroupsParent: "/a.slice/b.slice",
+			systemdCgroup: true,
+			expected:      "b.slice:cri-containerd:test-id",
+		},
+	} {
+		t.Logf("TestCase %q", desc)
+		got := getCgroupsPath(test.cgroupsParent, testID, test.systemdCgroup)
+		assert.Equal(t, test.expected, got)
 	}
 }
 
@@ -129,6 +151,27 @@ func TestBuildLabels(t *testing.T) {
 	newLabels["a"] = "e"
 	assert.Empty(t, configLabels[containerKindLabel], "should not add new labels into original label")
 	assert.Equal(t, "b", configLabels["a"], "change in new labels should not affect original label")
+}
+
+func TestOrderedMounts(t *testing.T) {
+	mounts := []*runtime.Mount{
+		{ContainerPath: "/a/b/c"},
+		{ContainerPath: "/a/b"},
+		{ContainerPath: "/a/b/c/d"},
+		{ContainerPath: "/a"},
+		{ContainerPath: "/b"},
+		{ContainerPath: "/b/c"},
+	}
+	expected := []*runtime.Mount{
+		{ContainerPath: "/a"},
+		{ContainerPath: "/b"},
+		{ContainerPath: "/a/b"},
+		{ContainerPath: "/b/c"},
+		{ContainerPath: "/a/b/c"},
+		{ContainerPath: "/a/b/c/d"},
+	}
+	sort.Stable(orderedMounts(mounts))
+	assert.Equal(t, expected, mounts)
 }
 
 func TestParseImageReferences(t *testing.T) {
@@ -191,35 +234,25 @@ func TestGenerateRuntimeOptions(t *testing.T) {
 systemd_cgroup = true
 [containerd]
   no_pivot = true
-  default_runtime_name = "default"
-[containerd.runtimes.legacy]
-  runtime_type = "` + plugin.RuntimeLinuxV1 + `"
+[containerd.default_runtime]
+  runtime_type = "` + linuxRuntime + `"
 [containerd.runtimes.runc]
-  runtime_type = "` + plugin.RuntimeRuncV1 + `"
-[containerd.runtimes.runcv2]
-  runtime_type = "` + plugin.RuntimeRuncV2 + `"
+  runtime_type = "` + runcRuntime + `"
 `
 	nonNilOpts := `
 systemd_cgroup = true
 [containerd]
   no_pivot = true
-  default_runtime_name = "default"
-[containerd.runtimes.legacy]
-  runtime_type = "` + plugin.RuntimeLinuxV1 + `"
-[containerd.runtimes.legacy.options]
-  Runtime = "legacy"
-  RuntimeRoot = "/legacy"
+[containerd.default_runtime]
+  runtime_type = "` + linuxRuntime + `"
+[containerd.default_runtime.options]
+  Runtime = "default"
+  RuntimeRoot = "/default"
 [containerd.runtimes.runc]
-  runtime_type = "` + plugin.RuntimeRuncV1 + `"
+  runtime_type = "` + runcRuntime + `"
 [containerd.runtimes.runc.options]
   BinaryName = "runc"
   Root = "/runc"
-  NoNewKeyring = true
-[containerd.runtimes.runcv2]
-  runtime_type = "` + plugin.RuntimeRuncV2 + `"
-[containerd.runtimes.runcv2.options]
-  BinaryName = "runc"
-  Root = "/runcv2"
   NoNewKeyring = true
 `
 	var nilOptsConfig, nonNilOptsConfig criconfig.Config
@@ -227,26 +260,21 @@ systemd_cgroup = true
 	require.NoError(t, err)
 	_, err = toml.Decode(nonNilOpts, &nonNilOptsConfig)
 	require.NoError(t, err)
-	require.Len(t, nilOptsConfig.Runtimes, 3)
-	require.Len(t, nonNilOptsConfig.Runtimes, 3)
+	require.Len(t, nilOptsConfig.Runtimes, 1)
+	require.Len(t, nonNilOptsConfig.Runtimes, 1)
 
 	for desc, test := range map[string]struct {
 		r               criconfig.Runtime
 		c               criconfig.Config
 		expectedOptions interface{}
 	}{
-		"when options is nil, should return nil option for io.containerd.runc.v1": {
+		"when options is nil, should return nil option for non legacy runtime": {
 			r:               nilOptsConfig.Runtimes["runc"],
 			c:               nilOptsConfig,
 			expectedOptions: nil,
 		},
-		"when options is nil, should return nil option for io.containerd.runc.v2": {
-			r:               nilOptsConfig.Runtimes["runcv2"],
-			c:               nilOptsConfig,
-			expectedOptions: nil,
-		},
 		"when options is nil, should use legacy fields for legacy runtime": {
-			r: nilOptsConfig.Runtimes["legacy"],
+			r: nilOptsConfig.DefaultRuntime,
 			c: nilOptsConfig,
 			expectedOptions: &runctypes.RuncOptions{
 				SystemdCgroup: true,
@@ -261,21 +289,12 @@ systemd_cgroup = true
 				NoNewKeyring: true,
 			},
 		},
-		"when options is not nil, should be able to decode for io.containerd.runc.v2": {
-			r: nonNilOptsConfig.Runtimes["runcv2"],
-			c: nonNilOptsConfig,
-			expectedOptions: &runcoptions.Options{
-				BinaryName:   "runc",
-				Root:         "/runcv2",
-				NoNewKeyring: true,
-			},
-		},
 		"when options is not nil, should be able to decode for legacy runtime": {
-			r: nonNilOptsConfig.Runtimes["legacy"],
+			r: nonNilOptsConfig.DefaultRuntime,
 			c: nonNilOptsConfig,
 			expectedOptions: &runctypes.RuncOptions{
-				Runtime:     "legacy",
-				RuntimeRoot: "/legacy",
+				Runtime:     "default",
+				RuntimeRoot: "/default",
 			},
 		},
 	} {
@@ -287,12 +306,33 @@ systemd_cgroup = true
 	}
 }
 
-func TestEnvDeduplication(t *testing.T) {
+func TestRestrictOOMScoreAdj(t *testing.T) {
+	current, err := getCurrentOOMScoreAdj()
+	require.NoError(t, err)
+
+	got, err := restrictOOMScoreAdj(current - 1)
+	require.NoError(t, err)
+	assert.Equal(t, got, current)
+
+	got, err = restrictOOMScoreAdj(current)
+	require.NoError(t, err)
+	assert.Equal(t, got, current)
+
+	got, err = restrictOOMScoreAdj(current + 1)
+	require.NoError(t, err)
+	assert.Equal(t, got, current+1)
+}
+
+func TestCustomGenerator(t *testing.T) {
 	for desc, test := range map[string]struct {
-		existing []string
-		kv       [][2]string
-		expected []string
+		existing  []string
+		kv        [][2]string
+		expected  []string
+		expectNil bool
 	}{
+		"empty": {
+			expectNil: true,
+		},
 		"single env": {
 			kv: [][2]string{
 				{"a", "b"},
@@ -347,152 +387,22 @@ func TestEnvDeduplication(t *testing.T) {
 		},
 	} {
 		t.Logf("TestCase %q", desc)
-		var spec runtimespec.Spec
+		var spec *runtimespec.Spec
 		if len(test.existing) > 0 {
-			spec.Process = &runtimespec.Process{
-				Env: test.existing,
+			spec = &runtimespec.Spec{
+				Process: &runtimespec.Process{
+					Env: test.existing,
+				},
 			}
 		}
+		g := newSpecGenerator(spec)
 		for _, kv := range test.kv {
-			oci.WithEnv([]string{kv[0] + "=" + kv[1]})(context.Background(), nil, nil, &spec)
+			g.AddProcessEnv(kv[0], kv[1])
 		}
-		assert.Equal(t, test.expected, spec.Process.Env)
-	}
-}
-
-func TestPassThroughAnnotationsFilter(t *testing.T) {
-	for desc, test := range map[string]struct {
-		podAnnotations         map[string]string
-		runtimePodAnnotations  []string
-		passthroughAnnotations map[string]string
-	}{
-		"should support direct match": {
-			podAnnotations:         map[string]string{"c": "d", "d": "e"},
-			runtimePodAnnotations:  []string{"c"},
-			passthroughAnnotations: map[string]string{"c": "d"},
-		},
-		"should support wildcard match": {
-			podAnnotations: map[string]string{
-				"t.f":  "j",
-				"z.g":  "o",
-				"z":    "o",
-				"y.ca": "b",
-				"y":    "b",
-			},
-			runtimePodAnnotations: []string{"*.f", "z*g", "y.c*"},
-			passthroughAnnotations: map[string]string{
-				"t.f":  "j",
-				"z.g":  "o",
-				"y.ca": "b",
-			},
-		},
-		"should support wildcard match all": {
-			podAnnotations: map[string]string{
-				"t.f":  "j",
-				"z.g":  "o",
-				"z":    "o",
-				"y.ca": "b",
-				"y":    "b",
-			},
-			runtimePodAnnotations: []string{"*"},
-			passthroughAnnotations: map[string]string{
-				"t.f":  "j",
-				"z.g":  "o",
-				"z":    "o",
-				"y.ca": "b",
-				"y":    "b",
-			},
-		},
-		"should support match including path separator": {
-			podAnnotations: map[string]string{
-				"matchend.com/end":    "1",
-				"matchend.com/end1":   "2",
-				"matchend.com/1end":   "3",
-				"matchmid.com/mid":    "4",
-				"matchmid.com/mi1d":   "5",
-				"matchmid.com/mid1":   "6",
-				"matchhead.com/head":  "7",
-				"matchhead.com/1head": "8",
-				"matchhead.com/head1": "9",
-				"matchall.com/abc":    "10",
-				"matchall.com/def":    "11",
-				"end/matchend":        "12",
-				"end1/matchend":       "13",
-				"1end/matchend":       "14",
-				"mid/matchmid":        "15",
-				"mi1d/matchmid":       "16",
-				"mid1/matchmid":       "17",
-				"head/matchhead":      "18",
-				"1head/matchhead":     "19",
-				"head1/matchhead":     "20",
-				"abc/matchall":        "21",
-				"def/matchall":        "22",
-				"match1/match2":       "23",
-				"nomatch/nomatch":     "24",
-			},
-			runtimePodAnnotations: []string{
-				"matchend.com/end*",
-				"matchmid.com/mi*d",
-				"matchhead.com/*head",
-				"matchall.com/*",
-				"end*/matchend",
-				"mi*d/matchmid",
-				"*head/matchhead",
-				"*/matchall",
-				"match*/match*",
-			},
-			passthroughAnnotations: map[string]string{
-				"matchend.com/end":    "1",
-				"matchend.com/end1":   "2",
-				"matchmid.com/mid":    "4",
-				"matchmid.com/mi1d":   "5",
-				"matchhead.com/head":  "7",
-				"matchhead.com/1head": "8",
-				"matchall.com/abc":    "10",
-				"matchall.com/def":    "11",
-				"end/matchend":        "12",
-				"end1/matchend":       "13",
-				"mid/matchmid":        "15",
-				"mi1d/matchmid":       "16",
-				"head/matchhead":      "18",
-				"1head/matchhead":     "19",
-				"abc/matchall":        "21",
-				"def/matchall":        "22",
-				"match1/match2":       "23",
-			},
-		},
-	} {
-		t.Run(desc, func(t *testing.T) {
-			passthroughAnnotations := getPassthroughAnnotations(test.podAnnotations, test.runtimePodAnnotations)
-			assert.Equal(t, test.passthroughAnnotations, passthroughAnnotations)
-		})
-	}
-}
-
-func TestEnsureRemoveAllNotExist(t *testing.T) {
-	// should never return an error for a non-existent path
-	if err := ensureRemoveAll(context.Background(), "/non/existent/path"); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestEnsureRemoveAllWithDir(t *testing.T) {
-	dir, err := ioutil.TempDir("", "test-ensure-removeall-with-dir")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ensureRemoveAll(context.Background(), dir); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestEnsureRemoveAllWithFile(t *testing.T) {
-	tmp, err := ioutil.TempFile("", "test-ensure-removeall-with-dir")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmp.Close()
-	if err := ensureRemoveAll(context.Background(), tmp.Name()); err != nil {
-		t.Fatal(err)
+		if test.expectNil {
+			assert.Nil(t, g.Config)
+		} else {
+			assert.Equal(t, test.expected, g.Config.Process.Env)
+		}
 	}
 }

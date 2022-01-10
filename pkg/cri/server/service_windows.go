@@ -1,52 +1,70 @@
 // +build windows
 
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
 
 import (
-	cni "github.com/containerd/go-cni"
-	"github.com/pkg/errors"
+	"strings"
+
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
-// windowsNetworkAttachCount is the minimum number of networks the PodSandbox
-// attaches to
-const windowsNetworkAttachCount = 1
+type Isolation string
 
-// initPlatform handles linux specific initialization for the CRI service.
-func (c *criService) initPlatform() error {
-	var err error
-	// For windows, the loopback network is added as default.
-	// There is no need to explicitly add one hence networkAttachCount is 1.
-	// If there are more network configs the pod will be attached to all the
-	// networks but we will only use the ip of the default network interface
-	// as the pod IP.
-	c.netPlugin, err = cni.New(cni.WithMinNetworkCount(windowsNetworkAttachCount),
-		cni.WithPluginConfDir(c.config.NetworkPluginConfDir),
-		cni.WithPluginMaxConfNum(c.config.NetworkPluginMaxConfNum),
-		cni.WithPluginDir([]string{c.config.NetworkPluginBinDir}))
-	if err != nil {
-		return errors.Wrap(err, "failed to initialize cni")
-	}
+const (
+	IsolationUnknown Isolation = ""
+	IsolationProcess           = "process"
+	IsolationHyperV            = "hyperv"
+)
 
-	return nil
+// isApparmorEnabled is not supported on Windows.
+func isApparmorEnabled() bool {
+	return false
 }
 
-// cniLoadOptions returns cni load options for the windows.
-func (c *criService) cniLoadOptions() []cni.CNIOpt {
-	return []cni.CNIOpt{cni.WithDefaultConf}
+// isSeccompEnabled is not supported on Windows.
+func isSeccompEnabled() bool {
+	return false
+}
+
+// doRunningInUserNSCheck is not supported on Windows.
+func doRunningInUserNSCheck(disableCGroup, apparmorEnabled, restrictOOMScoreAdj bool) {
+}
+
+// doSelinux is not supported on Windows.
+func doSelinux(enable bool) {
+}
+
+func (c *criService) getDefaultSnapshotterForSandbox(cfg *runtime.PodSandboxConfig) string {
+	var (
+		platform string
+	)
+	if cfg != nil {
+		platform = strings.Replace(cfg.Labels["sandbox-platform"], "-", "/", -1)
+	}
+	return c.getDefaultSnapshotterForPlatform(platform)
+}
+
+func (c *criService) getDefaultSnapshotterForPlatform(platform string) string {
+	if platform == "linux/amd64" {
+		return "windows-lcow"
+	} else if platform == "windows/amd64" {
+		return "windows"
+	}
+	return c.config.ContainerdConfig.Snapshotter
 }

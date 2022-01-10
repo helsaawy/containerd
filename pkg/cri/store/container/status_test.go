@@ -1,17 +1,17 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package container
@@ -36,12 +36,6 @@ func TestContainerState(t *testing.T) {
 		state  runtime.ContainerState
 	}{
 		"unknown state": {
-			status: Status{
-				Unknown: true,
-			},
-			state: runtime.ContainerState_CONTAINER_UNKNOWN,
-		},
-		"unknown state because there is no timestamp set": {
 			status: Status{},
 			state:  runtime.ContainerState_CONTAINER_UNKNOWN,
 		},
@@ -82,7 +76,6 @@ func TestStatusEncodeDecode(t *testing.T) {
 		Message:    "test-message",
 		Removing:   true,
 		Starting:   true,
-		Unknown:    true,
 	}
 	assert := assertlib.New(t)
 	data, err := s.encode()
@@ -91,7 +84,6 @@ func TestStatusEncodeDecode(t *testing.T) {
 	assert.NoError(newS.decode(data))
 	s.Removing = false // Removing should not be encoded.
 	s.Starting = false // Starting should not be encoded.
-	s.Unknown = false  // Unknown should not be encoded.
 	assert.Equal(s, newS)
 
 	unsupported, err := json.Marshal(&versionedStatus{

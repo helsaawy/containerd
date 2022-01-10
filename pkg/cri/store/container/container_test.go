@@ -1,33 +1,30 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package container
 
 import (
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/containerd/containerd/pkg/cri/store/label"
-	"github.com/opencontainers/selinux/go-selinux"
 	assertlib "github.com/stretchr/testify/assert"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	cio "github.com/containerd/containerd/pkg/cri/io"
-	"github.com/containerd/containerd/pkg/cri/store"
+	cio "github.com/containerd/cri/pkg/server/io"
+	"github.com/containerd/cri/pkg/store"
 )
 
 func TestContainerStore(t *testing.T) {
@@ -42,10 +39,9 @@ func TestContainerStore(t *testing.T) {
 					Attempt: 1,
 				},
 			},
-			ImageRef:     "TestImage-1",
-			StopSignal:   "SIGTERM",
-			LogPath:      "/test/log/path/1",
-			ProcessLabel: "junk:junk:junk:c1,c2",
+			ImageRef:   "TestImage-1",
+			StopSignal: "SIGTERM",
+			LogPath:    "/test/log/path/1",
 		},
 		"2abcd": {
 			ID:        "2abcd",
@@ -57,10 +53,9 @@ func TestContainerStore(t *testing.T) {
 					Attempt: 2,
 				},
 			},
-			StopSignal:   "SIGTERM",
-			ImageRef:     "TestImage-2",
-			LogPath:      "/test/log/path/2",
-			ProcessLabel: "junk:junk:junk:c1,c2",
+			StopSignal: "SIGTERM",
+			ImageRef:   "TestImage-2",
+			LogPath:    "/test/log/path/2",
 		},
 		"4a333": {
 			ID:        "4a333",
@@ -72,10 +67,9 @@ func TestContainerStore(t *testing.T) {
 					Attempt: 3,
 				},
 			},
-			StopSignal:   "SIGTERM",
-			ImageRef:     "TestImage-3",
-			LogPath:      "/test/log/path/3",
-			ProcessLabel: "junk:junk:junk:c1,c3",
+			StopSignal: "SIGTERM",
+			ImageRef:   "TestImage-3",
+			LogPath:    "/test/log/path/3",
 		},
 		"4abcd": {
 			ID:        "4abcd",
@@ -87,9 +81,8 @@ func TestContainerStore(t *testing.T) {
 					Attempt: 1,
 				},
 			},
-			StopSignal:   "SIGTERM",
-			ImageRef:     "TestImage-4abcd",
-			ProcessLabel: "junk:junk:junk:c1,c4",
+			StopSignal: "SIGTERM",
+			ImageRef:   "TestImage-4abcd",
 		},
 	}
 	statuses := map[string]Status{
@@ -143,14 +136,7 @@ func TestContainerStore(t *testing.T) {
 		containers[id] = container
 	}
 
-	s := NewStore(label.NewStore())
-	reserved := map[string]bool{}
-	s.labels.Reserver = func(label string) {
-		reserved[strings.SplitN(label, ":", 4)[3]] = true
-	}
-	s.labels.Releaser = func(label string) {
-		reserved[strings.SplitN(label, ":", 4)[3]] = false
-	}
+	s := NewStore()
 
 	t.Logf("should be able to add container")
 	for _, c := range containers {
@@ -169,15 +155,6 @@ func TestContainerStore(t *testing.T) {
 	cs := s.List()
 	assert.Len(cs, len(containers))
 
-	if selinux.GetEnabled() {
-		t.Logf("should have reserved labels (requires -tag selinux)")
-		assert.Equal(map[string]bool{
-			"c1,c2": true,
-			"c1,c3": true,
-			"c1,c4": true,
-		}, reserved)
-	}
-
 	cntrNum := len(containers)
 	for testID, v := range containers {
 		truncID := genTruncIndex(testID)
@@ -195,15 +172,6 @@ func TestContainerStore(t *testing.T) {
 		c, err := s.Get(truncID)
 		assert.Equal(Container{}, c)
 		assert.Equal(store.ErrNotExist, err)
-	}
-
-	if selinux.GetEnabled() {
-		t.Logf("should have released all labels (requires -tag selinux)")
-		assert.Equal(map[string]bool{
-			"c1,c2": false,
-			"c1,c3": false,
-			"c1,c4": false,
-		}, reserved)
 	}
 }
 

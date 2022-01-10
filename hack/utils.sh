@@ -1,24 +1,23 @@
 #!/bin/bash
 
-#   Copyright The containerd Authors.
-
-#   Licensed under the Apache License, Version 2.0 (the "License");
-#   you may not use this file except in compliance with the License.
-#   You may obtain a copy of the License at
-
-#       http://www.apache.org/licenses/LICENSE-2.0
-
-#   Unless required by applicable law or agreed to in writing, software
-#   distributed under the License is distributed on an "AS IS" BASIS,
-#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#   See the License for the specific language governing permissions and
-#   limitations under the License.
+# Copyright 2017 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"/..
 
 # Not from vendor.conf.
-KUBERNETES_VERSION="v1.19.0-beta.2"
-CRITOOL_VERSION=${CRITOOL_VERSION:-baca4a152dfe671fc17911a7af74bcb61680ee39}
+CRITOOL_VERSION=v1.13.0
 CRITOOL_PKG=github.com/kubernetes-sigs/cri-tools
 CRITOOL_REPO=github.com/kubernetes-sigs/cri-tools
 
@@ -82,7 +81,7 @@ from-vendor() {
                   BEGIN { rc=1 }                        # Assume we did not find what we were looking for.
                   // {
                      if ($1 == REPO) {
-                        if ($3 != "" && $3 !~ /#.*/ ) { gsub(/http.*\/\//, "", $3); REPO = $3 };    # Override repo.
+                        if ($3 != "") { gsub(/http.*\/\//, "", $3); REPO = $3 };    # Override repo.
                         printf("%s_VERSION=%s; %s_REPO=%s\n", WHAT, $2, WHAT, REPO);
                         rc=0;                           # Note success for use in END block.
                         exit                            # No point looking further.

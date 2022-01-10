@@ -1,44 +1,38 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
 
 import (
-	"path/filepath"
-	"time"
+	"fmt"
+	"strconv"
+	"strings"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/oci"
-	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/typeurl"
-	"github.com/davecgh/go-spew/spew"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
-	selinux "github.com/opencontainers/selinux/go-selinux"
+	"github.com/opencontainers/runtime-tools/validate"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
+	"github.com/sirupsen/logrus"
+	"github.com/syndtr/gocapability/capability"
+	"golang.org/x/sys/windows"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	cio "github.com/containerd/containerd/pkg/cri/io"
-	customopts "github.com/containerd/containerd/pkg/cri/opts"
-	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
-	"github.com/containerd/containerd/pkg/cri/util"
-	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
+	containerstore "github.com/containerd/cri/pkg/store/container"
+	"github.com/containerd/cri/pkg/util"
 )
 
 func init() {
@@ -46,300 +40,309 @@ func init() {
 		"github.com/containerd/cri/pkg/store/container", "Metadata")
 }
 
-// CreateContainer creates a new container in the given PodSandbox.
-func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateContainerRequest) (_ *runtime.CreateContainerResponse, retErr error) {
-	config := r.GetConfig()
-	log.G(ctx).Debugf("Container config %+v", config)
-	sandboxConfig := r.GetSandboxConfig()
-	sandbox, err := c.sandboxStore.Get(r.GetPodSandboxId())
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to find sandbox id %q", r.GetPodSandboxId())
-	}
-	sandboxID := sandbox.ID
-	s, err := sandbox.Container.Task(ctx, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to get sandbox container task")
-	}
-	sandboxPid := s.Pid()
-
-	// Generate unique id and name for the container and reserve the name.
-	// Reserve the container name to avoid concurrent `CreateContainer` request creating
-	// the same container.
-	id := util.GenerateID()
-	metadata := config.GetMetadata()
-	if metadata == nil {
-		return nil, errors.New("container config must include metadata")
-	}
-	containerName := metadata.Name
-	name := makeContainerName(metadata, sandboxConfig.GetMetadata())
-	log.G(ctx).Debugf("Generated id %q for container %q", id, name)
-	if err = c.containerNameIndex.Reserve(name, id); err != nil {
-		return nil, errors.Wrapf(err, "failed to reserve container name %q", name)
-	}
-	defer func() {
-		// Release the name if the function returns with an error.
-		if retErr != nil {
-			c.containerNameIndex.ReleaseByName(name)
+// setOCIProcessArgs sets process args. It returns error if the final arg list
+// is empty.
+func setOCIProcessArgs(g *generator, config *runtime.ContainerConfig, image *imagespec.Image) error {
+	command, args := config.GetCommand(), config.GetArgs()
+	// The following logic is migrated from https://github.com/moby/moby/blob/master/daemon/commit.go
+	// TODO(random-liu): Clearly define the commands overwrite behavior.
+	if len(command) == 0 {
+		// Copy array to avoid data race.
+		if len(args) == 0 {
+			args = append([]string{}, image.Config.Cmd...)
 		}
-	}()
-
-	// Create initial internal container metadata.
-	meta := containerstore.Metadata{
-		ID:        id,
-		Name:      name,
-		SandboxID: sandboxID,
-		Config:    config,
-	}
-
-	// Prepare container image snapshot. For container, the image should have
-	// been pulled before creating the container, so do not ensure the image.
-	image, err := c.localResolve(config.GetImage().GetImage())
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to resolve image %q", config.GetImage().GetImage())
-	}
-	containerdImage, err := c.toContainerdImage(ctx, image)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get image from containerd %q", image.ID)
-	}
-
-	// Run container using the same runtime with sandbox.
-	sandboxInfo, err := sandbox.Container.Info(ctx)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get sandbox %q info", sandboxID)
-	}
-
-	// Create container root directory.
-	containerRootDir := c.getContainerRootDir(id)
-	if err = c.os.MkdirAll(containerRootDir, 0755); err != nil {
-		return nil, errors.Wrapf(err, "failed to create container root directory %q",
-			containerRootDir)
-	}
-	defer func() {
-		if retErr != nil {
-			// Cleanup the container root directory.
-			if err = c.os.RemoveAll(containerRootDir); err != nil {
-				log.G(ctx).WithError(err).Errorf("Failed to remove container root directory %q",
-					containerRootDir)
-			}
+		if command == nil {
+			command = append([]string{}, image.Config.Entrypoint...)
 		}
-	}()
-	volatileContainerRootDir := c.getVolatileContainerRootDir(id)
-	if err = c.os.MkdirAll(volatileContainerRootDir, 0755); err != nil {
-		return nil, errors.Wrapf(err, "failed to create volatile container root directory %q",
-			volatileContainerRootDir)
 	}
-	defer func() {
-		if retErr != nil {
-			// Cleanup the volatile container root directory.
-			if err = c.os.RemoveAll(volatileContainerRootDir); err != nil {
-				log.G(ctx).WithError(err).Errorf("Failed to remove volatile container root directory %q",
-					volatileContainerRootDir)
-			}
-		}
-	}()
-
-	var volumeMounts []*runtime.Mount
-	if !c.config.IgnoreImageDefinedVolumes {
-		// Create container image volumes mounts.
-		volumeMounts = c.volumeMounts(containerRootDir, config.GetMounts(), &image.ImageSpec.Config)
-	} else if len(image.ImageSpec.Config.Volumes) != 0 {
-		log.G(ctx).Debugf("Ignoring volumes defined in image %v because IgnoreImageDefinedVolumes is set", image.ID)
+	if len(command) == 0 && len(args) == 0 {
+		return errors.New("no command specified")
 	}
-
-	// Generate container mounts.
-	mounts := c.containerMounts(sandboxID, config)
-
-	ociRuntime, err := c.getSandboxRuntime(sandboxConfig, sandbox.Metadata.RuntimeHandler)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to get sandbox runtime")
+	var ignoreArgsEscaped bool
+	if ignoreArgsEscapedAnno, ok := config.Annotations["microsoft.io/ignore-args-escaped"]; ok {
+		ignoreArgsEscaped = ignoreArgsEscapedAnno == "true"
 	}
-	log.G(ctx).Debugf("Use OCI runtime %+v for sandbox %q and container %q", ociRuntime, sandboxID, id)
-
-	spec, err := c.containerSpec(id, sandboxID, sandboxPid, sandbox.NetNSPath, containerName, config, sandboxConfig,
-		&image.ImageSpec.Config, append(mounts, volumeMounts...), ociRuntime)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to generate container %q spec", id)
-	}
-
-	meta.ProcessLabel = spec.Process.SelinuxLabel
-
-	// handle any KVM based runtime
-	if err := modifyProcessLabel(ociRuntime.Type, spec); err != nil {
-		return nil, err
-	}
-
-	if config.GetLinux().GetSecurityContext().GetPrivileged() {
-		// If privileged don't set the SELinux label but still record it on the container so
-		// the unused MCS label can be release later
-		spec.Process.SelinuxLabel = ""
-	}
-	defer func() {
-		if retErr != nil {
-			selinux.ReleaseLabel(spec.Process.SelinuxLabel)
-		}
-	}()
-
-	log.G(ctx).Debugf("Container %q spec: %#+v", id, spew.NewFormatter(spec))
-
-	snapshotterOpt := snapshots.WithLabels(snapshots.FilterInheritedLabels(config.Annotations))
-	// Set snapshotter before any other options.
-	opts := []containerd.NewContainerOpts{
-		containerd.WithSnapshotter(c.config.ContainerdConfig.Snapshotter),
-		// Prepare container rootfs. This is always writeable even if
-		// the container wants a readonly rootfs since we want to give
-		// the runtime (runc) a chance to modify (e.g. to create mount
-		// points corresponding to spec.Mounts) before making the
-		// rootfs readonly (requested by spec.Root.Readonly).
-		customopts.WithNewSnapshot(id, containerdImage, snapshotterOpt),
-	}
-	if len(volumeMounts) > 0 {
-		mountMap := make(map[string]string)
-		for _, v := range volumeMounts {
-			mountMap[filepath.Clean(v.HostPath)] = v.ContainerPath
-		}
-		opts = append(opts, customopts.WithVolumes(mountMap))
-	}
-	meta.ImageRef = image.ID
-	meta.StopSignal = image.ImageSpec.Config.StopSignal
-
-	// Validate log paths and compose full container log path.
-	if sandboxConfig.GetLogDirectory() != "" && config.GetLogPath() != "" {
-		meta.LogPath = filepath.Join(sandboxConfig.GetLogDirectory(), config.GetLogPath())
-		log.G(ctx).Debugf("Composed container full log path %q using sandbox log dir %q and container log path %q",
-			meta.LogPath, sandboxConfig.GetLogDirectory(), config.GetLogPath())
-	} else {
-		log.G(ctx).Infof("Logging will be disabled due to empty log paths for sandbox (%q) or container (%q)",
-			sandboxConfig.GetLogDirectory(), config.GetLogPath())
-	}
-
-	containerIO, err := cio.NewContainerIO(id,
-		cio.WithNewFIFOs(volatileContainerRootDir, config.GetTty(), config.GetStdin()))
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create container io")
-	}
-	defer func() {
-		if retErr != nil {
-			if err := containerIO.Close(); err != nil {
-				log.G(ctx).WithError(err).Errorf("Failed to close container io %q", id)
-			}
-		}
-	}()
-
-	specOpts, err := c.containerSpecOpts(config, &image.ImageSpec.Config)
-	if err != nil {
-		return nil, errors.Wrap(err, "")
-	}
-
-	containerLabels := buildLabels(config.Labels, containerKindContainer)
-
-	runtimeOptions, err := getRuntimeOptions(sandboxInfo)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to get runtime options")
-	}
-	opts = append(opts,
-		containerd.WithSpec(spec, specOpts...),
-		containerd.WithRuntime(sandboxInfo.Runtime.Name, runtimeOptions),
-		containerd.WithContainerLabels(containerLabels),
-		containerd.WithContainerExtension(containerMetadataExtension, &meta))
-	var cntr containerd.Container
-	if cntr, err = c.client.NewContainer(ctx, id, opts...); err != nil {
-		return nil, errors.Wrap(err, "failed to create containerd container")
-	}
-	defer func() {
-		if retErr != nil {
-			deferCtx, deferCancel := ctrdutil.DeferContext()
-			defer deferCancel()
-			if err := cntr.Delete(deferCtx, containerd.WithSnapshotCleanup); err != nil {
-				log.G(ctx).WithError(err).Errorf("Failed to delete containerd container %q", id)
-			}
-		}
-	}()
-
-	status := containerstore.Status{CreatedAt: time.Now().UnixNano()}
-	container, err := containerstore.NewContainer(meta,
-		containerstore.WithStatus(status, containerRootDir),
-		containerstore.WithContainer(cntr),
-		containerstore.WithContainerIO(containerIO),
-	)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to create internal container object for %q", id)
-	}
-	defer func() {
-		if retErr != nil {
-			// Cleanup container checkpoint on error.
-			if err := container.Delete(); err != nil {
-				log.G(ctx).WithError(err).Errorf("Failed to cleanup container checkpoint for %q", id)
-			}
-		}
-	}()
-
-	// Add container into container store.
-	if err := c.containerStore.Add(container); err != nil {
-		return nil, errors.Wrapf(err, "failed to add container %q into store", id)
-	}
-
-	return &runtime.CreateContainerResponse{ContainerId: id}, nil
+	setProcessArgs(g, image.OS == "windows", image.Config.ArgsEscaped && !ignoreArgsEscaped, append(command, args...))
+	return nil
 }
 
-// volumeMounts sets up image volumes for container. Rely on the removal of container
-// root directory to do cleanup. Note that image volume will be skipped, if there is criMounts
-// specified with the same destination.
-func (c *criService) volumeMounts(containerRootDir string, criMounts []*runtime.Mount, config *imagespec.ImageConfig) []*runtime.Mount {
-	if len(config.Volumes) == 0 {
+// setProcessArgs sets either g.Config.Process.CommandLine or g.Config.Process.Args.
+// This is forked from g.SetProcessArgs to add argsEscaped support.
+func setProcessArgs(g *generator, isWindows bool, argsEscaped bool, args []string) {
+	logrus.WithFields(logrus.Fields{
+		"isWindows":   isWindows,
+		"argsEscaped": argsEscaped,
+		"args":        args,
+	}).Info("Setting process args on OCI spec")
+	if g.Config == nil {
+		g.Config = &runtimespec.Spec{}
+	}
+	if g.Config.Process == nil {
+		g.Config.Process = &runtimespec.Process{}
+	}
+
+	if isWindows && argsEscaped {
+		// argsEscaped is used for Windows containers to indicate that the command line should be
+		// used from args[0] without escaping. This case seems to mostly result from use of
+		// shell-form ENTRYPOINT or CMD in the Dockerfile. argsEscaped is a non-standard OCI
+		// extension but we are using it here to support Docker images that rely on it. In the
+		// future we should move to some properly standardized support in upstream OCI.
+		// This logic is taken from https://github.com/moby/moby/blob/24f173a003727611aa482a55b812e0e39c67be65/daemon/oci_windows.go#L244
+		//
+		// Note: The approach taken here causes ArgsEscaped to change how commands passed directly
+		// via CRI are interpreted as well. However, this actually matches with Docker's behavior
+		// regarding commands specified at container create time, and seems non-trivial to fix,
+		// so going to leave this way for now.
+		g.Config.Process.CommandLine = args[0]
+		if len(args[1:]) > 0 {
+			g.Config.Process.CommandLine += " " + escapeArgs(args[1:])
+		}
+	} else {
+		g.Config.Process.Args = args
+	}
+}
+
+// escapeArgs makes a Windows-style escaped command line from a set of arguments
+func escapeArgs(args []string) string {
+	escapedArgs := make([]string, len(args))
+	for i, a := range args {
+		escapedArgs[i] = windows.EscapeArg(a)
+	}
+	return strings.Join(escapedArgs, " ")
+}
+
+// addImageEnvs adds environment variables from image config. It returns error if
+// an invalid environment variable is encountered.
+func addImageEnvs(g *generator, imageEnvs []string) error {
+	for _, e := range imageEnvs {
+		kv := strings.SplitN(e, "=", 2)
+		if len(kv) != 2 {
+			return errors.Errorf("invalid environment variable %q", e)
+		}
+		g.AddProcessEnv(kv[0], kv[1])
+	}
+	return nil
+}
+
+func setOCIPrivileged(g *generator, config *runtime.ContainerConfig) error {
+	// Add all capabilities in privileged mode.
+	g.SetupPrivileged(true)
+	setOCIBindMountsPrivileged(g)
+	if err := setOCIDevicesPrivileged(g); err != nil {
+		return errors.Wrapf(err, "failed to set devices mapping %+v", config.GetDevices())
+	}
+	return nil
+}
+
+func clearReadOnly(m *runtimespec.Mount) {
+	var opt []string
+	for _, o := range m.Options {
+		if o != "ro" {
+			opt = append(opt, o)
+		}
+	}
+	m.Options = append(opt, "rw")
+}
+
+// setOCILinuxResourceCgroup set container cgroup resource limit.
+func setOCILinuxResourceCgroup(g *generator, resources *runtime.LinuxContainerResources) {
+	if resources == nil {
+		return
+	}
+	g.SetLinuxResourcesCPUPeriod(uint64(resources.GetCpuPeriod()))
+	g.SetLinuxResourcesCPUQuota(resources.GetCpuQuota())
+	g.SetLinuxResourcesCPUShares(uint64(resources.GetCpuShares()))
+	g.SetLinuxResourcesMemoryLimit(resources.GetMemoryLimitInBytes())
+	g.SetLinuxResourcesCPUCpus(resources.GetCpusetCpus())
+	g.SetLinuxResourcesCPUMems(resources.GetCpusetMems())
+}
+
+// setOCILinuxResourceOOMScoreAdj set container OOMScoreAdj resource limit.
+func setOCILinuxResourceOOMScoreAdj(g *generator, resources *runtime.LinuxContainerResources, restrictOOMScoreAdjFlag bool) error {
+	if resources == nil {
 		return nil
 	}
-	var mounts []*runtime.Mount
-	for dst := range config.Volumes {
-		if isInCRIMounts(dst, criMounts) {
-			// Skip the image volume, if there is CRI defined volume mapping.
-			// TODO(random-liu): This should be handled by Kubelet in the future.
-			// Kubelet should decide what to use for image volume, and also de-duplicate
-			// the image volume and user mounts.
-			continue
+	adj := int(resources.GetOomScoreAdj())
+	if restrictOOMScoreAdjFlag {
+		var err error
+		adj, err = restrictOOMScoreAdj(adj)
+		if err != nil {
+			return err
 		}
-		volumeID := util.GenerateID()
-		src := filepath.Join(containerRootDir, "volumes", volumeID)
-		// addOCIBindMounts will create these volumes.
-		mounts = append(mounts, &runtime.Mount{
-			ContainerPath:  dst,
-			HostPath:       src,
-			SelinuxRelabel: true,
-		})
 	}
-	return mounts
+	g.SetProcessOOMScoreAdj(adj)
+
+	return nil
 }
 
-// runtimeSpec returns a default runtime spec used in cri-containerd.
-func (c *criService) runtimeSpec(id string, baseSpecFile string, opts ...oci.SpecOpts) (*runtimespec.Spec, error) {
-	// GenerateSpec needs namespace.
-	ctx := ctrdutil.NamespacedContext()
-	container := &containers.Container{ID: id}
-
-	if baseSpecFile != "" {
-		baseSpec, ok := c.baseOCISpecs[baseSpecFile]
-		if !ok {
-			return nil, errors.Errorf("can't find base OCI spec %q", baseSpecFile)
+func setOCIBindMountsPrivileged(g *generator) {
+	spec := g.Config
+	// clear readonly for /sys and cgroup
+	for i, m := range spec.Mounts {
+		if spec.Mounts[i].Destination == "/sys" {
+			clearReadOnly(&spec.Mounts[i])
 		}
-
-		spec := oci.Spec{}
-		if err := util.DeepCopy(&spec, &baseSpec); err != nil {
-			return nil, errors.Wrap(err, "failed to clone OCI spec")
+		if m.Type == "cgroup" {
+			clearReadOnly(&spec.Mounts[i])
 		}
+	}
+	spec.Linux.ReadonlyPaths = nil
+	spec.Linux.MaskedPaths = nil
+}
 
-		// Fix up cgroups path
-		applyOpts := append([]oci.SpecOpts{oci.WithNamespacedCgroup()}, opts...)
+// setOCINamespace sets the correct namespace value in the OCI spec based on the CRI namespace mode.
+func setOCINamespace(g *generator, mode runtime.NamespaceMode, nsName string, podNS string) error {
+	switch mode {
+	case runtime.NamespaceMode_POD:
+		// Use the pod's namespace.
+		return g.AddOrReplaceLinuxNamespace(nsName, podNS)
+	case runtime.NamespaceMode_CONTAINER:
+		// Empty path will cause the OCI runtime to create a new container ns.
+		return g.AddOrReplaceLinuxNamespace(nsName, "")
+	case runtime.NamespaceMode_NODE:
+		// NS not in the spec at all will cause it to inherit from the runtime (host).
+		return g.RemoveLinuxNamespace(nsName)
+	}
+	return fmt.Errorf("unsupported namespace mode for %s: %d", nsName, mode)
+}
 
-		if err := oci.ApplyOpts(ctx, nil, container, &spec, applyOpts...); err != nil {
-			return nil, errors.Wrap(err, "failed to apply OCI options")
+// setOCINamespaces sets namespaces.
+func setOCINamespaces(g *generator, namespaces *runtime.NamespaceOption, sandboxPid uint32) error {
+	if err := setOCINamespace(g, namespaces.GetNetwork(), string(runtimespec.NetworkNamespace), getNetworkNamespace(sandboxPid)); err != nil {
+		return err
+	}
+	if err := setOCINamespace(g, namespaces.GetIpc(), string(runtimespec.IPCNamespace), getIPCNamespace(sandboxPid)); err != nil {
+		return err
+	}
+	if err := setOCINamespace(g, namespaces.GetPid(), string(runtimespec.PIDNamespace), getPIDNamespace(sandboxPid)); err != nil {
+		return err
+	}
+	// CRI does not have a namespace option for UTS, so use the pod's namespace.
+	if err := setOCINamespace(g, runtime.NamespaceMode_POD, string(runtimespec.UTSNamespace), getUTSNamespace(sandboxPid)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// generateUserString generates valid user string based on OCI Image Spec
+// v1.0.0.
+//
+// CRI defines that the following combinations are valid:
+//
+// uid, uid/gid, username, username/gid
+//
+// TODO(random-liu): Add group name support in CRI.
+func generateUserString(username string, uid, gid *runtime.Int64Value) (string, error) {
+	var userstr, groupstr string
+	if uid != nil {
+		userstr = strconv.FormatInt(uid.GetValue(), 10)
+	}
+	if username != "" {
+		userstr = username
+	}
+	if gid != nil {
+		groupstr = strconv.FormatInt(gid.GetValue(), 10)
+	}
+	if userstr == "" {
+		if groupstr != "" {
+			return "", errors.Errorf("user group %q is specified without user", groupstr)
 		}
+		return "", nil
+	}
+	if groupstr != "" {
+		userstr = userstr + ":" + groupstr
+	}
+	return userstr, nil
+}
 
-		return &spec, nil
+// getOCICapabilitiesList returns a list of all available capabilities.
+func getOCICapabilitiesList() []string {
+	var caps []string
+	for _, cap := range capability.List() {
+		if cap > validate.LastCap() {
+			continue
+		}
+		caps = append(caps, "CAP_"+strings.ToUpper(cap.String()))
+	}
+	return caps
+}
+
+// Adds capabilities to all sets relevant to root (bounding, permitted, effective, inheritable)
+func addProcessRootCapability(g *generator, c string) error {
+	if err := g.AddProcessCapabilityBounding(c); err != nil {
+		return err
+	}
+	if err := g.AddProcessCapabilityPermitted(c); err != nil {
+		return err
+	}
+	if err := g.AddProcessCapabilityEffective(c); err != nil {
+		return err
+	}
+	if err := g.AddProcessCapabilityInheritable(c); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Drops capabilities to all sets relevant to root (bounding, permitted, effective, inheritable)
+func dropProcessRootCapability(g *generator, c string) error {
+	if err := g.DropProcessCapabilityBounding(c); err != nil {
+		return err
+	}
+	if err := g.DropProcessCapabilityPermitted(c); err != nil {
+		return err
+	}
+	if err := g.DropProcessCapabilityEffective(c); err != nil {
+		return err
+	}
+	if err := g.DropProcessCapabilityInheritable(c); err != nil {
+		return err
+	}
+	return nil
+}
+
+// setOCICapabilities adds/drops process capabilities.
+func setOCICapabilities(g *generator, capabilities *runtime.Capability) error {
+	if capabilities == nil {
+		return nil
 	}
 
-	spec, err := oci.GenerateSpec(ctx, nil, container, opts...)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to generate spec")
+	// Add/drop all capabilities if "all" is specified, so that
+	// following individual add/drop could still work. E.g.
+	// AddCapabilities: []string{"ALL"}, DropCapabilities: []string{"CHOWN"}
+	// will be all capabilities without `CAP_CHOWN`.
+	if util.InStringSlice(capabilities.GetAddCapabilities(), "ALL") {
+		for _, c := range getOCICapabilitiesList() {
+			if err := addProcessRootCapability(g, c); err != nil {
+				return err
+			}
+		}
+	}
+	if util.InStringSlice(capabilities.GetDropCapabilities(), "ALL") {
+		for _, c := range getOCICapabilitiesList() {
+			if err := dropProcessRootCapability(g, c); err != nil {
+				return err
+			}
+		}
 	}
 
-	return spec, nil
+	for _, c := range capabilities.GetAddCapabilities() {
+		if strings.ToUpper(c) == "ALL" {
+			continue
+		}
+		// Capabilities in CRI doesn't have `CAP_` prefix, so add it.
+		if err := addProcessRootCapability(g, "CAP_"+strings.ToUpper(c)); err != nil {
+			return err
+		}
+	}
+
+	for _, c := range capabilities.GetDropCapabilities() {
+		if strings.ToUpper(c) == "ALL" {
+			continue
+		}
+		if err := dropProcessRootCapability(g, "CAP_"+strings.ToUpper(c)); err != nil {
+			return err
+		}
+	}
+	return nil
 }

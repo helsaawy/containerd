@@ -1,60 +1,49 @@
 // +build windows
 
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package config
 
-import (
-	"os"
-	"path/filepath"
-
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/pkg/cri/streaming"
-)
+import "github.com/containerd/containerd"
 
 // DefaultConfig returns default configurations of cri plugin.
 func DefaultConfig() PluginConfig {
 	return PluginConfig{
 		CniConfig: CniConfig{
-			NetworkPluginBinDir:       filepath.Join(os.Getenv("ProgramFiles"), "containerd", "cni", "bin"),
-			NetworkPluginConfDir:      filepath.Join(os.Getenv("ProgramFiles"), "containerd", "cni", "conf"),
-			NetworkPluginMaxConfNum:   1,
+			NetworkPluginBinDir:       "C:\\Program Files\\containerd\\data\\cni\\bin",
+			NetworkPluginConfDir:      "C:\\Program Files\\containerd\\data\\cni\\config",
 			NetworkPluginConfTemplate: "",
 		},
 		ContainerdConfig: ContainerdConfig{
-			Snapshotter:        containerd.DefaultSnapshotter,
-			DefaultRuntimeName: "runhcs-wcow-process",
-			NoPivot:            false,
-			Runtimes: map[string]Runtime{
-				"runhcs-wcow-process": {
-					Type: "io.containerd.runhcs.v1",
-				},
+			Snapshotter: containerd.DefaultSnapshotter,
+			DefaultRuntime: Runtime{
+				Type:   "io.containerd.runhcs.v1",
+				Engine: "",
+				Root:   "",
 			},
 		},
-		DisableTCPService:   true,
 		StreamServerAddress: "127.0.0.1",
 		StreamServerPort:    "0",
-		StreamIdleTimeout:   streaming.DefaultConfig.StreamIdleTimeout.String(), // 4 hour
 		EnableTLSStreaming:  false,
 		X509KeyPairStreaming: X509KeyPairStreaming{
 			TLSKeyFile:  "",
 			TLSCertFile: "",
 		},
-		SandboxImage:            "mcr.microsoft.com/oss/kubernetes/pause:1.4.0",
+		SandboxImage:            "mcr.microsoft.com/windows/nanoserver:1809", // "k8s.gcr.io/pause:3.2",
 		StatsCollectPeriod:      10,
 		MaxContainerLogLineSize: 16 * 1024,
 		Registry: Registry{
@@ -64,8 +53,5 @@ func DefaultConfig() PluginConfig {
 				},
 			},
 		},
-		MaxConcurrentDownloads:    3,
-		IgnoreImageDefinedVolumes: false,
-		// TODO(windows): Add platform specific config, so that most common defaults can be shared.
 	}
 }

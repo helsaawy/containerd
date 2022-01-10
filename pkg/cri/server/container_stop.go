@@ -1,17 +1,17 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
@@ -26,11 +26,11 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
-	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	"github.com/containerd/containerd/pkg/cri/store"
-	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
-	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
+	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
+	"github.com/containerd/cri/pkg/store"
+	containerstore "github.com/containerd/cri/pkg/store/container"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
 // StopContainer stops a running container with a grace period (i.e., timeout).
@@ -68,7 +68,15 @@ func (c *criService) stopContainer(ctx context.Context, container containerstore
 			return errors.Wrapf(err, "failed to get task for container %q", id)
 		}
 		// Don't return for unknown state, some cleanup needs to be done.
-		if state == runtime.ContainerState_CONTAINER_UNKNOWN {
+		if state == runtime.ContainerState_CONTAINER_UNKNOWN || state == runtime.ContainerState_CONTAINER_RUNNING {
+			// For the container running case we've somehow ended up in a state where the shim is gone but cri
+			// still thinks the container is running. If the task exit event was missed from events.handleContainerExit this
+			// is the likely culprit but a repro of this is hard to pull off. Even in the event of a shim crash task.Wait would return and
+			// update the status, so if this condition is hit it's a myriad of strange behavior probably
+			// related to containerd restart quirks. Update the status to finished and close the container stop channel.
+			if state == runtime.ContainerState_CONTAINER_RUNNING {
+				log.G(ctx).Warn("Cri container state is `Running` but the task can't be found for the container")
+			}
 			return cleanupUnknownContainer(ctx, id, container)
 		}
 		return nil
@@ -125,11 +133,18 @@ func (c *criService) stopContainer(ctx context.Context, container containerstore
 				}
 			}
 		}
-		sig, err := containerd.ParseSignal(stopSignal)
+
+		sandboxPlatform, err := c.getSandboxPlatform(container.Metadata.SandboxID)
+		if err != nil {
+			return errors.Wrapf(err, "failed to get container's sandbox platform")
+		}
+
+		sig, err := containerd.ParsePlatformSignal(stopSignal, sandboxPlatform)
 		if err != nil {
 			return errors.Wrapf(err, "failed to parse stop signal %q", stopSignal)
 		}
 		log.G(ctx).Infof("Stop container %q with signal %v", id, sig)
+
 		if err = task.Kill(ctx, sig); err != nil && !errdefs.IsNotFound(err) {
 			return errors.Wrapf(err, "failed to stop container %q", id)
 		}

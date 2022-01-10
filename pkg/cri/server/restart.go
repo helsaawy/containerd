@@ -1,17 +1,17 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
@@ -20,7 +20,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	goruntime "runtime"
 	"time"
 
 	"github.com/containerd/containerd"
@@ -30,15 +29,16 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/typeurl"
+	"github.com/docker/docker/pkg/system"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	cio "github.com/containerd/containerd/pkg/cri/io"
-	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
-	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
-	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
-	"github.com/containerd/containerd/pkg/netns"
+	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
+	"github.com/containerd/cri/pkg/netns"
+	cio "github.com/containerd/cri/pkg/server/io"
+	containerstore "github.com/containerd/cri/pkg/store/container"
+	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
 )
 
 // NOTE: The recovery logic has following assumption: when the cri plugin is down:
@@ -58,12 +58,14 @@ func (c *criService) recover(ctx context.Context) error {
 		return errors.Wrap(err, "failed to list sandbox containers")
 	}
 	for _, sandbox := range sandboxes {
+		l := log.G(ctx).WithField("containerID", sandbox.ID())
+		l.Debug("Loading sandbox")
 		sb, err := c.loadSandbox(ctx, sandbox)
 		if err != nil {
-			log.G(ctx).WithError(err).Errorf("Failed to load sandbox %q", sandbox.ID())
+			l.WithError(err).Errorf("Failed to load sandbox")
 			continue
 		}
-		log.G(ctx).Debugf("Loaded sandbox %+v", sb)
+		l.Debugf("Loaded sandbox")
 		if err := c.sandboxStore.Add(sb); err != nil {
 			return errors.Wrapf(err, "failed to add sandbox %q to store", sandbox.ID())
 		}
@@ -78,12 +80,14 @@ func (c *criService) recover(ctx context.Context) error {
 		return errors.Wrap(err, "failed to list containers")
 	}
 	for _, container := range containers {
+		l := log.G(ctx).WithField("containerID", container.ID())
+		l.Debug("Loading container")
 		cntr, err := c.loadContainer(ctx, container)
 		if err != nil {
-			log.G(ctx).WithError(err).Errorf("Failed to load container %q", container.ID())
+			l.WithError(err).Errorf("Failed to load container")
 			continue
 		}
-		log.G(ctx).Debugf("Loaded container %+v", cntr)
+		l.Debugf("Loaded container")
 		if err := c.containerStore.Add(cntr); err != nil {
 			return errors.Wrapf(err, "failed to add container %q to store", container.ID())
 		}
@@ -251,6 +255,11 @@ func (c *criService) loadContainer(ctx context.Context, cntr containerd.Containe
 				// Container is in exited/unknown state, return the status as it is.
 			}
 		} else {
+			// If we need to terminate any running containers, mark it as stopped here.
+			// This will cause it to be stopped via WithProcessKill in the switch case below.
+			if c.config.TerminateContainersOnRestart {
+				s.Status = containerd.Stopped
+			}
 			// Task status is found. Update container status based on the up-to-date task status.
 			switch s.Status {
 			case containerd.Created:
@@ -293,6 +302,7 @@ func (c *criService) loadContainer(ctx context.Context, cntr containerd.Containe
 					c.eventMonitor.startExitMonitor(context.Background(), id, status.Pid, exitCh)
 				}
 			case containerd.Stopped:
+				log.G(ctx).WithField("containerID", cntr.ID()).Info("Deleting dead container task")
 				// Task is stopped. Updata status and delete the task.
 				if _, err := t.Delete(ctx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
 					return errors.Wrap(err, "failed to delete task")
@@ -307,9 +317,7 @@ func (c *criService) loadContainer(ctx context.Context, cntr containerd.Containe
 	}()
 	if err != nil {
 		log.G(ctx).WithError(err).Errorf("Failed to load container status for %q", id)
-		// Only set the unknown field in this case, because other fields may
-		// contain useful information loaded from the checkpoint.
-		status.Unknown = true
+		status = unknownContainerStatus()
 	}
 	opts := []containerstore.Opts{
 		containerstore.WithStatus(status, containerDir),
@@ -376,7 +384,9 @@ func (c *criService) loadSandbox(ctx context.Context, cntr containerd.Container)
 			// Task does not exist, set sandbox state as NOTREADY.
 			status.State = sandboxstore.StateNotReady
 		} else {
-			if taskStatus.Status == containerd.Running {
+			// If we need to terminate running containers, treat it as stopped, so the else condition
+			// will clean it up via WithProcessKill.
+			if taskStatus.Status == containerd.Running && !c.config.TerminateContainersOnRestart {
 				// Wait for the task for sandbox monitor.
 				// wait is a long running background request, no timeout needed.
 				exitCh, err := t.Wait(ctrdutil.NamespacedContext())
@@ -392,6 +402,7 @@ func (c *criService) loadSandbox(ctx context.Context, cntr containerd.Container)
 					c.eventMonitor.startExitMonitor(context.Background(), meta.ID, status.Pid, exitCh)
 				}
 			} else {
+				log.G(ctx).WithField("sandboxID", cntr.ID()).Info("Deleting dead sandbox task")
 				// Task is not running. Delete the task and set sandbox state as NOTREADY.
 				if _, err := t.Delete(ctx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
 					return status, errors.Wrap(err, "failed to delete task")
@@ -409,8 +420,7 @@ func (c *criService) loadSandbox(ctx context.Context, cntr containerd.Container)
 	sandbox.Container = cntr
 
 	// Load network namespace.
-	if goruntime.GOOS != "windows" &&
-		meta.Config.GetLinux().GetSecurityContext().GetNamespaceOptions().GetNetwork() == runtime.NamespaceMode_NODE {
+	if meta.Config.GetLinux().GetSecurityContext().GetNamespaceOptions().GetNetwork() == runtime.NamespaceMode_NODE {
 		// Don't need to load netns for host network sandbox.
 		return sandbox, nil
 	}
@@ -473,7 +483,7 @@ func cleanupOrphanedIDDirs(ctx context.Context, cntrs []containerd.Container, ba
 			continue
 		}
 		dir := filepath.Join(base, d.Name())
-		if err := ensureRemoveAll(ctx, dir); err != nil {
+		if err := system.EnsureRemoveAll(dir); err != nil {
 			log.G(ctx).WithError(err).Warnf("Failed to remove id directory %q", dir)
 		} else {
 			log.G(ctx).Debugf("Cleanup orphaned id directory %q", dir)

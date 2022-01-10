@@ -1,23 +1,25 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
 
 import (
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
 	cni "github.com/containerd/go-cni"
@@ -25,23 +27,107 @@ import (
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	"github.com/containerd/containerd/pkg/cri/annotations"
-	criconfig "github.com/containerd/containerd/pkg/cri/config"
-	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
+	"github.com/containerd/cri/pkg/annotations"
+	criconfig "github.com/containerd/cri/pkg/config"
+	ostesting "github.com/containerd/cri/pkg/os/testing"
+	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
 )
 
-func TestSandboxContainerSpec(t *testing.T) {
+func getRunPodSandboxTestData() (*runtime.PodSandboxConfig, *imagespec.ImageConfig, func(*testing.T, string, *runtimespec.Spec)) {
+	config := &runtime.PodSandboxConfig{
+		Metadata: &runtime.PodSandboxMetadata{
+			Name:      "test-name",
+			Uid:       "test-uid",
+			Namespace: "test-ns",
+			Attempt:   1,
+		},
+		Hostname:     "test-hostname",
+		LogDirectory: "test-log-directory",
+		Labels:       map[string]string{"a": "b"},
+		Annotations:  map[string]string{"c": "d"},
+		Linux: &runtime.LinuxPodSandboxConfig{
+			CgroupParent: "/test/cgroup/parent",
+		},
+	}
+	imageConfig := &imagespec.ImageConfig{
+		Env:        []string{"a=b", "c=d"},
+		Entrypoint: []string{"/pause"},
+		Cmd:        []string{"forever"},
+		WorkingDir: "/workspace",
+	}
+	specCheck := func(t *testing.T, id string, spec *runtimespec.Spec) {
+		assert.Equal(t, "test-hostname", spec.Hostname)
+		assert.Equal(t, getCgroupsPath("/test/cgroup/parent", id, false), spec.Linux.CgroupsPath)
+		assert.Equal(t, relativeRootfsPath, spec.Root.Path)
+		assert.Equal(t, true, spec.Root.Readonly)
+		assert.Contains(t, spec.Process.Env, "a=b", "c=d")
+		assert.Equal(t, []string{"/pause", "forever"}, spec.Process.Args)
+		assert.Equal(t, "/workspace", spec.Process.Cwd)
+		assert.EqualValues(t, *spec.Linux.Resources.CPU.Shares, defaultSandboxCPUshares)
+		assert.EqualValues(t, *spec.Process.OOMScoreAdj, defaultSandboxOOMAdj)
+
+		t.Logf("Check PodSandbox annotations")
+		assert.Contains(t, spec.Annotations, annotations.SandboxID)
+		assert.EqualValues(t, spec.Annotations[annotations.SandboxID], id)
+
+		assert.Contains(t, spec.Annotations, annotations.ContainerType)
+		assert.EqualValues(t, spec.Annotations[annotations.ContainerType], annotations.ContainerTypeSandbox)
+	}
+	return config, imageConfig, specCheck
+}
+
+func TestGenerateSandboxContainerSpec(t *testing.T) {
 	testID := "test-id"
 	nsPath := "test-cni"
 	for desc, test := range map[string]struct {
 		configChange      func(*runtime.PodSandboxConfig)
-		podAnnotations    []string
 		imageConfigChange func(*imagespec.ImageConfig)
 		specCheck         func(*testing.T, *runtimespec.Spec)
 		expectErr         bool
 	}{
+		"spec should reflect original config": {
+			specCheck: func(t *testing.T, spec *runtimespec.Spec) {
+				// runtime spec should have expected namespaces enabled by default.
+				require.NotNil(t, spec.Linux)
+				assert.Contains(t, spec.Linux.Namespaces, runtimespec.LinuxNamespace{
+					Type: runtimespec.NetworkNamespace,
+					Path: nsPath,
+				})
+				assert.Contains(t, spec.Linux.Namespaces, runtimespec.LinuxNamespace{
+					Type: runtimespec.PIDNamespace,
+				})
+				assert.Contains(t, spec.Linux.Namespaces, runtimespec.LinuxNamespace{
+					Type: runtimespec.IPCNamespace,
+				})
+			},
+		},
+		"host namespace": {
+			configChange: func(c *runtime.PodSandboxConfig) {
+				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
+					NamespaceOptions: &runtime.NamespaceOption{
+						Network: runtime.NamespaceMode_NODE,
+						Pid:     runtime.NamespaceMode_NODE,
+						Ipc:     runtime.NamespaceMode_NODE,
+					},
+				}
+			},
+			specCheck: func(t *testing.T, spec *runtimespec.Spec) {
+				// runtime spec should disable expected namespaces in host mode.
+				require.NotNil(t, spec.Linux)
+				assert.NotContains(t, spec.Linux.Namespaces, runtimespec.LinuxNamespace{
+					Type: runtimespec.NetworkNamespace,
+				})
+				assert.NotContains(t, spec.Linux.Namespaces, runtimespec.LinuxNamespace{
+					Type: runtimespec.PIDNamespace,
+				})
+				assert.NotContains(t, spec.Linux.Namespaces, runtimespec.LinuxNamespace{
+					Type: runtimespec.IPCNamespace,
+				})
+			},
+		},
 		"should return error when entrypoint and cmd are empty": {
 			imageConfigChange: func(c *imagespec.ImageConfig) {
 				c.Entrypoint = nil
@@ -49,40 +135,23 @@ func TestSandboxContainerSpec(t *testing.T) {
 			},
 			expectErr: true,
 		},
-		"a passthrough annotation should be passed as an OCI annotation": {
-			podAnnotations: []string{"c"},
-			specCheck: func(t *testing.T, spec *runtimespec.Spec) {
-				assert.Equal(t, spec.Annotations["c"], "d")
+		"should return error when env is invalid ": {
+			// Also covers addImageEnvs.
+			imageConfigChange: func(c *imagespec.ImageConfig) {
+				c.Env = []string{"a"}
 			},
+			expectErr: true,
 		},
-		"a non-passthrough annotation should not be passed as an OCI annotation": {
+		"should set supplemental groups correctly": {
 			configChange: func(c *runtime.PodSandboxConfig) {
-				c.Annotations["d"] = "e"
+				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
+					SupplementalGroups: []int64{1111, 2222},
+				}
 			},
-			podAnnotations: []string{"c"},
 			specCheck: func(t *testing.T, spec *runtimespec.Spec) {
-				assert.Equal(t, spec.Annotations["c"], "d")
-				_, ok := spec.Annotations["d"]
-				assert.False(t, ok)
-			},
-		},
-		"passthrough annotations should support wildcard match": {
-			configChange: func(c *runtime.PodSandboxConfig) {
-				c.Annotations["t.f"] = "j"
-				c.Annotations["z.g"] = "o"
-				c.Annotations["z"] = "o"
-				c.Annotations["y.ca"] = "b"
-				c.Annotations["y"] = "b"
-			},
-			podAnnotations: []string{"t*", "z.*", "y.c*"},
-			specCheck: func(t *testing.T, spec *runtimespec.Spec) {
-				assert.Equal(t, spec.Annotations["t.f"], "j")
-				assert.Equal(t, spec.Annotations["z.g"], "o")
-				assert.Equal(t, spec.Annotations["y.ca"], "b")
-				_, ok := spec.Annotations["y"]
-				assert.False(t, ok)
-				_, ok = spec.Annotations["z"]
-				assert.False(t, ok)
+				require.NotNil(t, spec.Process)
+				assert.Contains(t, spec.Process.User.AdditionalGids, uint32(1111))
+				assert.Contains(t, spec.Process.User.AdditionalGids, uint32(2222))
 			},
 		},
 	} {
@@ -92,12 +161,10 @@ func TestSandboxContainerSpec(t *testing.T) {
 		if test.configChange != nil {
 			test.configChange(config)
 		}
-
 		if test.imageConfigChange != nil {
 			test.imageConfigChange(imageConfig)
 		}
-		spec, err := c.sandboxContainerSpec(testID, config, imageConfig, nsPath,
-			test.podAnnotations)
+		spec, err := c.generateSandboxContainerSpec(testID, config, imageConfig, nsPath)
 		if test.expectErr {
 			assert.Error(t, err)
 			assert.Nil(t, spec)
@@ -112,6 +179,360 @@ func TestSandboxContainerSpec(t *testing.T) {
 	}
 }
 
+func TestSetupSandboxFiles(t *testing.T) {
+	const (
+		testID       = "test-id"
+		realhostname = "test-real-hostname"
+	)
+	for desc, test := range map[string]struct {
+		dnsConfig     *runtime.DNSConfig
+		hostname      string
+		ipcMode       runtime.NamespaceMode
+		expectedCalls []ostesting.CalledDetail
+	}{
+		"should check host /dev/shm existence when ipc mode is NODE": {
+			ipcMode: runtime.NamespaceMode_NODE,
+			expectedCalls: []ostesting.CalledDetail{
+				{
+					Name: "Hostname",
+				},
+				{
+					Name: "WriteFile",
+					Arguments: []interface{}{
+						filepath.Join(testRootDir, sandboxesDir, testID, "hostname"),
+						[]byte(realhostname + "\n"),
+						os.FileMode(0644),
+					},
+				},
+				{
+					Name: "CopyFile",
+					Arguments: []interface{}{
+						"/etc/hosts",
+						filepath.Join(testRootDir, sandboxesDir, testID, "hosts"),
+						os.FileMode(0644),
+					},
+				},
+				{
+					Name: "CopyFile",
+					Arguments: []interface{}{
+						"/etc/resolv.conf",
+						filepath.Join(testRootDir, sandboxesDir, testID, "resolv.conf"),
+						os.FileMode(0644),
+					},
+				},
+				{
+					Name:      "Stat",
+					Arguments: []interface{}{"/dev/shm"},
+				},
+			},
+		},
+		"should create new /etc/resolv.conf if DNSOptions is set": {
+			dnsConfig: &runtime.DNSConfig{
+				Servers:  []string{"8.8.8.8"},
+				Searches: []string{"114.114.114.114"},
+				Options:  []string{"timeout:1"},
+			},
+			ipcMode: runtime.NamespaceMode_NODE,
+			expectedCalls: []ostesting.CalledDetail{
+				{
+					Name: "Hostname",
+				},
+				{
+					Name: "WriteFile",
+					Arguments: []interface{}{
+						filepath.Join(testRootDir, sandboxesDir, testID, "hostname"),
+						[]byte(realhostname + "\n"),
+						os.FileMode(0644),
+					},
+				},
+				{
+					Name: "CopyFile",
+					Arguments: []interface{}{
+						"/etc/hosts",
+						filepath.Join(testRootDir, sandboxesDir, testID, "hosts"),
+						os.FileMode(0644),
+					},
+				},
+				{
+					Name: "WriteFile",
+					Arguments: []interface{}{
+						filepath.Join(testRootDir, sandboxesDir, testID, "resolv.conf"),
+						[]byte(`search 114.114.114.114
+nameserver 8.8.8.8
+options timeout:1
+`), os.FileMode(0644),
+					},
+				},
+				{
+					Name:      "Stat",
+					Arguments: []interface{}{"/dev/shm"},
+				},
+			},
+		},
+		"should create sandbox shm when ipc namespace mode is not NODE": {
+			ipcMode: runtime.NamespaceMode_POD,
+			expectedCalls: []ostesting.CalledDetail{
+				{
+					Name: "Hostname",
+				},
+				{
+					Name: "WriteFile",
+					Arguments: []interface{}{
+						filepath.Join(testRootDir, sandboxesDir, testID, "hostname"),
+						[]byte(realhostname + "\n"),
+						os.FileMode(0644),
+					},
+				},
+				{
+					Name: "CopyFile",
+					Arguments: []interface{}{
+						"/etc/hosts",
+						filepath.Join(testRootDir, sandboxesDir, testID, "hosts"),
+						os.FileMode(0644),
+					},
+				},
+				{
+					Name: "CopyFile",
+					Arguments: []interface{}{
+						"/etc/resolv.conf",
+						filepath.Join(testRootDir, sandboxesDir, testID, "resolv.conf"),
+						os.FileMode(0644),
+					},
+				},
+				{
+					Name: "MkdirAll",
+					Arguments: []interface{}{
+						filepath.Join(testStateDir, sandboxesDir, testID, "shm"),
+						os.FileMode(0700),
+					},
+				},
+				{
+					Name: "Mount",
+					// Ignore arguments which are too complex to check.
+				},
+			},
+		},
+		"should create /etc/hostname when hostname is set": {
+			hostname: "test-hostname",
+			ipcMode:  runtime.NamespaceMode_NODE,
+			expectedCalls: []ostesting.CalledDetail{
+				{
+					Name: "WriteFile",
+					Arguments: []interface{}{
+						filepath.Join(testRootDir, sandboxesDir, testID, "hostname"),
+						[]byte("test-hostname\n"),
+						os.FileMode(0644),
+					},
+				},
+				{
+					Name: "CopyFile",
+					Arguments: []interface{}{
+						"/etc/hosts",
+						filepath.Join(testRootDir, sandboxesDir, testID, "hosts"),
+						os.FileMode(0644),
+					},
+				},
+				{
+					Name: "CopyFile",
+					Arguments: []interface{}{
+						"/etc/resolv.conf",
+						filepath.Join(testRootDir, sandboxesDir, testID, "resolv.conf"),
+						os.FileMode(0644),
+					},
+				},
+				{
+					Name:      "Stat",
+					Arguments: []interface{}{"/dev/shm"},
+				},
+			},
+		},
+	} {
+		t.Logf("TestCase %q", desc)
+		c := newTestCRIService()
+		c.os.(*ostesting.FakeOS).HostnameFn = func() (string, error) {
+			return realhostname, nil
+		}
+		cfg := &runtime.PodSandboxConfig{
+			Hostname:  test.hostname,
+			DnsConfig: test.dnsConfig,
+			Linux: &runtime.LinuxPodSandboxConfig{
+				SecurityContext: &runtime.LinuxSandboxSecurityContext{
+					NamespaceOptions: &runtime.NamespaceOption{
+						Ipc: test.ipcMode,
+					},
+				},
+			},
+		}
+		c.setupSandboxFiles(testID, cfg)
+		calls := c.os.(*ostesting.FakeOS).GetCalls()
+		assert.Len(t, calls, len(test.expectedCalls))
+		for i, expected := range test.expectedCalls {
+			if expected.Arguments == nil {
+				// Ignore arguments.
+				expected.Arguments = calls[i].Arguments
+			}
+			assert.Equal(t, expected, calls[i])
+		}
+	}
+}
+
+func TestParseDNSOption(t *testing.T) {
+	for desc, test := range map[string]struct {
+		servers         []string
+		searches        []string
+		options         []string
+		expectedContent string
+		expectErr       bool
+	}{
+		"empty dns options should return empty content": {},
+		"non-empty dns options should return correct content": {
+			servers:  []string{"8.8.8.8", "server.google.com"},
+			searches: []string{"114.114.114.114"},
+			options:  []string{"timeout:1"},
+			expectedContent: `search 114.114.114.114
+nameserver 8.8.8.8
+nameserver server.google.com
+options timeout:1
+`,
+		},
+		"should return error if dns search exceeds limit(6)": {
+			searches: []string{
+				"server0.google.com",
+				"server1.google.com",
+				"server2.google.com",
+				"server3.google.com",
+				"server4.google.com",
+				"server5.google.com",
+				"server6.google.com",
+			},
+			expectErr: true,
+		},
+	} {
+		t.Logf("TestCase %q", desc)
+		resolvContent, err := parseDNSOptions(test.servers, test.searches, test.options)
+		if test.expectErr {
+			assert.Error(t, err)
+			continue
+		}
+		assert.NoError(t, err)
+		assert.Equal(t, resolvContent, test.expectedContent)
+	}
+}
+
+func TestToCNIPortMappings(t *testing.T) {
+	for desc, test := range map[string]struct {
+		criPortMappings []*runtime.PortMapping
+		cniPortMappings []cni.PortMapping
+	}{
+		"empty CRI port mapping should map to empty CNI port mapping": {},
+		"CRI port mapping should be converted to CNI port mapping properly": {
+			criPortMappings: []*runtime.PortMapping{
+				{
+					Protocol:      runtime.Protocol_UDP,
+					ContainerPort: 1234,
+					HostPort:      5678,
+					HostIp:        "123.124.125.126",
+				},
+				{
+					Protocol:      runtime.Protocol_TCP,
+					ContainerPort: 4321,
+					HostPort:      8765,
+					HostIp:        "126.125.124.123",
+				},
+			},
+			cniPortMappings: []cni.PortMapping{
+				{
+					HostPort:      5678,
+					ContainerPort: 1234,
+					Protocol:      "udp",
+					HostIP:        "123.124.125.126",
+				},
+				{
+					HostPort:      8765,
+					ContainerPort: 4321,
+					Protocol:      "tcp",
+					HostIP:        "126.125.124.123",
+				},
+			},
+		},
+		"CRI port mapping without host port should be skipped": {
+			criPortMappings: []*runtime.PortMapping{
+				{
+					Protocol:      runtime.Protocol_UDP,
+					ContainerPort: 1234,
+					HostIp:        "123.124.125.126",
+				},
+				{
+					Protocol:      runtime.Protocol_TCP,
+					ContainerPort: 4321,
+					HostPort:      8765,
+					HostIp:        "126.125.124.123",
+				},
+			},
+			cniPortMappings: []cni.PortMapping{
+				{
+					HostPort:      8765,
+					ContainerPort: 4321,
+					Protocol:      "tcp",
+					HostIP:        "126.125.124.123",
+				},
+			},
+		},
+		"CRI port mapping with unsupported protocol should be skipped": {
+			criPortMappings: []*runtime.PortMapping{
+				{
+					Protocol:      runtime.Protocol_SCTP,
+					ContainerPort: 1234,
+					HostPort:      5678,
+					HostIp:        "123.124.125.126",
+				},
+				{
+					Protocol:      runtime.Protocol_TCP,
+					ContainerPort: 4321,
+					HostPort:      8765,
+					HostIp:        "126.125.124.123",
+				},
+			},
+			cniPortMappings: []cni.PortMapping{
+				{
+					HostPort:      8765,
+					ContainerPort: 4321,
+					Protocol:      "tcp",
+					HostIP:        "126.125.124.123",
+				},
+			},
+		},
+	} {
+		t.Logf("TestCase %q", desc)
+		assert.Equal(t, test.cniPortMappings, toCNIPortMappings(test.criPortMappings))
+	}
+}
+
+func TestSelectPodIP(t *testing.T) {
+	for desc, test := range map[string]struct {
+		ips      []string
+		expected string
+	}{
+		"ipv4 should be picked even if ipv6 comes first": {
+			ips:      []string{"2001:db8:85a3::8a2e:370:7334", "192.168.17.43"},
+			expected: "192.168.17.43",
+		},
+		"ipv6 should be picked when there is no ipv4": {
+			ips:      []string{"2001:db8:85a3::8a2e:370:7334"},
+			expected: "2001:db8:85a3::8a2e:370:7334",
+		},
+	} {
+		t.Logf("TestCase %q", desc)
+		var ipConfigs []*cni.IPConfig
+		for _, ip := range test.ips {
+			ipConfigs = append(ipConfigs, &cni.IPConfig{
+				IP: net.ParseIP(ip),
+			})
+		}
+		assert.Equal(t, test.expected, selectPodIP(ipConfigs))
+	}
+}
+
 func TestTypeurlMarshalUnmarshalSandboxMeta(t *testing.T) {
 	for desc, test := range map[string]struct {
 		configChange func(*runtime.PodSandboxConfig)
@@ -119,9 +540,6 @@ func TestTypeurlMarshalUnmarshalSandboxMeta(t *testing.T) {
 		"should marshal original config": {},
 		"should marshal Linux": {
 			configChange: func(c *runtime.PodSandboxConfig) {
-				if c.Linux == nil {
-					c.Linux = &runtime.LinuxPodSandboxConfig{}
-				}
 				c.Linux.SecurityContext = &runtime.LinuxSandboxSecurityContext{
 					NamespaceOptions: &runtime.NamespaceOption{
 						Network: runtime.NamespaceMode_NODE,
@@ -152,141 +570,6 @@ func TestTypeurlMarshalUnmarshalSandboxMeta(t *testing.T) {
 		curMeta, ok := data.(*sandboxstore.Metadata)
 		assert.True(t, ok)
 		assert.Equal(t, meta, curMeta)
-	}
-}
-
-func TestToCNIPortMappings(t *testing.T) {
-	for desc, test := range map[string]struct {
-		criPortMappings []*runtime.PortMapping
-		cniPortMappings []cni.PortMapping
-	}{
-		"empty CRI port mapping should map to empty CNI port mapping": {},
-		"CRI port mapping should be converted to CNI port mapping properly": {
-			criPortMappings: []*runtime.PortMapping{
-				{
-					Protocol:      runtime.Protocol_UDP,
-					ContainerPort: 1234,
-					HostPort:      5678,
-					HostIp:        "123.124.125.126",
-				},
-				{
-					Protocol:      runtime.Protocol_TCP,
-					ContainerPort: 4321,
-					HostPort:      8765,
-					HostIp:        "126.125.124.123",
-				},
-				{
-					Protocol:      runtime.Protocol_SCTP,
-					ContainerPort: 1234,
-					HostPort:      5678,
-					HostIp:        "123.124.125.126",
-				},
-			},
-			cniPortMappings: []cni.PortMapping{
-				{
-					HostPort:      5678,
-					ContainerPort: 1234,
-					Protocol:      "udp",
-					HostIP:        "123.124.125.126",
-				},
-				{
-					HostPort:      8765,
-					ContainerPort: 4321,
-					Protocol:      "tcp",
-					HostIP:        "126.125.124.123",
-				},
-				{
-					HostPort:      5678,
-					ContainerPort: 1234,
-					Protocol:      "sctp",
-					HostIP:        "123.124.125.126",
-				},
-			},
-		},
-		"CRI port mapping without host port should be skipped": {
-			criPortMappings: []*runtime.PortMapping{
-				{
-					Protocol:      runtime.Protocol_UDP,
-					ContainerPort: 1234,
-					HostIp:        "123.124.125.126",
-				},
-				{
-					Protocol:      runtime.Protocol_TCP,
-					ContainerPort: 4321,
-					HostPort:      8765,
-					HostIp:        "126.125.124.123",
-				},
-			},
-			cniPortMappings: []cni.PortMapping{
-				{
-					HostPort:      8765,
-					ContainerPort: 4321,
-					Protocol:      "tcp",
-					HostIP:        "126.125.124.123",
-				},
-			},
-		},
-		"CRI port mapping with unsupported protocol should be skipped": {
-			criPortMappings: []*runtime.PortMapping{
-				{
-					Protocol:      runtime.Protocol_TCP,
-					ContainerPort: 4321,
-					HostPort:      8765,
-					HostIp:        "126.125.124.123",
-				},
-			},
-			cniPortMappings: []cni.PortMapping{
-				{
-					HostPort:      8765,
-					ContainerPort: 4321,
-					Protocol:      "tcp",
-					HostIP:        "126.125.124.123",
-				},
-			},
-		},
-	} {
-		t.Logf("TestCase %q", desc)
-		assert.Equal(t, test.cniPortMappings, toCNIPortMappings(test.criPortMappings))
-	}
-}
-
-func TestSelectPodIP(t *testing.T) {
-	for desc, test := range map[string]struct {
-		ips                   []string
-		expectedIP            string
-		expectedAdditionalIPs []string
-	}{
-		"ipv4 should be picked even if ipv6 comes first": {
-			ips:                   []string{"2001:db8:85a3::8a2e:370:7334", "192.168.17.43"},
-			expectedIP:            "192.168.17.43",
-			expectedAdditionalIPs: []string{"2001:db8:85a3::8a2e:370:7334"},
-		},
-		"ipv4 should be picked when there is only ipv4": {
-			ips:                   []string{"192.168.17.43"},
-			expectedIP:            "192.168.17.43",
-			expectedAdditionalIPs: nil,
-		},
-		"ipv6 should be picked when there is no ipv4": {
-			ips:                   []string{"2001:db8:85a3::8a2e:370:7334"},
-			expectedIP:            "2001:db8:85a3::8a2e:370:7334",
-			expectedAdditionalIPs: nil,
-		},
-		"the first ipv4 should be picked when there are multiple ipv4": { // unlikely to happen
-			ips:                   []string{"2001:db8:85a3::8a2e:370:7334", "192.168.17.43", "2001:db8:85a3::8a2e:370:7335", "192.168.17.45"},
-			expectedIP:            "192.168.17.43",
-			expectedAdditionalIPs: []string{"2001:db8:85a3::8a2e:370:7334", "2001:db8:85a3::8a2e:370:7335", "192.168.17.45"},
-		},
-	} {
-		t.Logf("TestCase %q", desc)
-		var ipConfigs []*cni.IPConfig
-		for _, ip := range test.ips {
-			ipConfigs = append(ipConfigs, &cni.IPConfig{
-				IP: net.ParseIP(ip),
-			})
-		}
-		ip, additionalIPs := selectPodIPs(ipConfigs)
-		assert.Equal(t, test.expectedIP, ip)
-		assert.Equal(t, test.expectedAdditionalIPs, additionalIPs)
 	}
 }
 
@@ -356,11 +639,13 @@ func TestGetSandboxRuntime(t *testing.T) {
 	}
 
 	for desc, test := range map[string]struct {
-		sandboxConfig   *runtime.PodSandboxConfig
-		runtimeHandler  string
-		runtimes        map[string]criconfig.Runtime
-		expectErr       bool
-		expectedRuntime criconfig.Runtime
+		sandboxConfig            *runtime.PodSandboxConfig
+		runtimeHandler           string
+		defaultRuntime           criconfig.Runtime
+		untrustedWorkloadRuntime criconfig.Runtime
+		runtimes                 map[string]criconfig.Runtime
+		expectErr                bool
+		expectedRuntime          criconfig.Runtime
 	}{
 		"should return error if untrusted workload requires host access": {
 			sandboxConfig: &runtime.PodSandboxConfig{
@@ -378,11 +663,9 @@ func TestGetSandboxRuntime(t *testing.T) {
 					annotations.UntrustedWorkload: "true",
 				},
 			},
-			runtimes: map[string]criconfig.Runtime{
-				criconfig.RuntimeDefault:   defaultRuntime,
-				criconfig.RuntimeUntrusted: untrustedWorkloadRuntime,
-			},
-			expectErr: true,
+			defaultRuntime:           defaultRuntime,
+			untrustedWorkloadRuntime: untrustedWorkloadRuntime,
+			expectErr:                true,
 		},
 		"should use untrusted workload runtime for untrusted workload": {
 			sandboxConfig: &runtime.PodSandboxConfig{
@@ -390,18 +673,15 @@ func TestGetSandboxRuntime(t *testing.T) {
 					annotations.UntrustedWorkload: "true",
 				},
 			},
-			runtimes: map[string]criconfig.Runtime{
-				criconfig.RuntimeDefault:   defaultRuntime,
-				criconfig.RuntimeUntrusted: untrustedWorkloadRuntime,
-			},
-			expectedRuntime: untrustedWorkloadRuntime,
+			defaultRuntime:           defaultRuntime,
+			untrustedWorkloadRuntime: untrustedWorkloadRuntime,
+			expectedRuntime:          untrustedWorkloadRuntime,
 		},
 		"should use default runtime for regular workload": {
-			sandboxConfig: &runtime.PodSandboxConfig{},
-			runtimes: map[string]criconfig.Runtime{
-				criconfig.RuntimeDefault: defaultRuntime,
-			},
-			expectedRuntime: defaultRuntime,
+			sandboxConfig:            &runtime.PodSandboxConfig{},
+			defaultRuntime:           defaultRuntime,
+			untrustedWorkloadRuntime: untrustedWorkloadRuntime,
+			expectedRuntime:          defaultRuntime,
 		},
 		"should use default runtime for trusted workload": {
 			sandboxConfig: &runtime.PodSandboxConfig{
@@ -409,11 +689,9 @@ func TestGetSandboxRuntime(t *testing.T) {
 					annotations.UntrustedWorkload: "false",
 				},
 			},
-			runtimes: map[string]criconfig.Runtime{
-				criconfig.RuntimeDefault:   defaultRuntime,
-				criconfig.RuntimeUntrusted: untrustedWorkloadRuntime,
-			},
-			expectedRuntime: defaultRuntime,
+			defaultRuntime:           defaultRuntime,
+			untrustedWorkloadRuntime: untrustedWorkloadRuntime,
+			expectedRuntime:          defaultRuntime,
 		},
 		"should return error if untrusted workload runtime is required but not configured": {
 			sandboxConfig: &runtime.PodSandboxConfig{
@@ -421,10 +699,8 @@ func TestGetSandboxRuntime(t *testing.T) {
 					annotations.UntrustedWorkload: "true",
 				},
 			},
-			runtimes: map[string]criconfig.Runtime{
-				criconfig.RuntimeDefault: defaultRuntime,
-			},
-			expectErr: true,
+			defaultRuntime: defaultRuntime,
+			expectErr:      true,
 		},
 		"should use 'untrusted' runtime for untrusted workload": {
 			sandboxConfig: &runtime.PodSandboxConfig{
@@ -432,10 +708,8 @@ func TestGetSandboxRuntime(t *testing.T) {
 					annotations.UntrustedWorkload: "true",
 				},
 			},
-			runtimes: map[string]criconfig.Runtime{
-				criconfig.RuntimeDefault:   defaultRuntime,
-				criconfig.RuntimeUntrusted: untrustedWorkloadRuntime,
-			},
+			defaultRuntime:  defaultRuntime,
+			runtimes:        map[string]criconfig.Runtime{criconfig.RuntimeUntrusted: untrustedWorkloadRuntime},
 			expectedRuntime: untrustedWorkloadRuntime,
 		},
 		"should use 'untrusted' runtime for untrusted workload & handler": {
@@ -444,11 +718,9 @@ func TestGetSandboxRuntime(t *testing.T) {
 					annotations.UntrustedWorkload: "true",
 				},
 			},
-			runtimeHandler: "untrusted",
-			runtimes: map[string]criconfig.Runtime{
-				criconfig.RuntimeDefault:   defaultRuntime,
-				criconfig.RuntimeUntrusted: untrustedWorkloadRuntime,
-			},
+			runtimeHandler:  "untrusted",
+			defaultRuntime:  defaultRuntime,
+			runtimes:        map[string]criconfig.Runtime{criconfig.RuntimeUntrusted: untrustedWorkloadRuntime},
 			expectedRuntime: untrustedWorkloadRuntime,
 		},
 		"should return an error if untrusted annotation with conflicting handler": {
@@ -457,32 +729,26 @@ func TestGetSandboxRuntime(t *testing.T) {
 					annotations.UntrustedWorkload: "true",
 				},
 			},
-			runtimeHandler: "foo",
-			runtimes: map[string]criconfig.Runtime{
-				criconfig.RuntimeDefault:   defaultRuntime,
-				criconfig.RuntimeUntrusted: untrustedWorkloadRuntime,
-				"foo":                      fooRuntime,
-			},
-			expectErr: true,
+			runtimeHandler:           "foo",
+			defaultRuntime:           defaultRuntime,
+			untrustedWorkloadRuntime: untrustedWorkloadRuntime,
+			runtimes:                 map[string]criconfig.Runtime{"foo": fooRuntime},
+			expectErr:                true,
 		},
 		"should use correct runtime for a runtime handler": {
-			sandboxConfig:  &runtime.PodSandboxConfig{},
-			runtimeHandler: "foo",
-			runtimes: map[string]criconfig.Runtime{
-				criconfig.RuntimeDefault:   defaultRuntime,
-				criconfig.RuntimeUntrusted: untrustedWorkloadRuntime,
-				"foo":                      fooRuntime,
-			},
-			expectedRuntime: fooRuntime,
+			sandboxConfig:            &runtime.PodSandboxConfig{},
+			runtimeHandler:           "foo",
+			defaultRuntime:           defaultRuntime,
+			untrustedWorkloadRuntime: untrustedWorkloadRuntime,
+			runtimes:                 map[string]criconfig.Runtime{"foo": fooRuntime},
+			expectedRuntime:          fooRuntime,
 		},
 		"should return error if runtime handler is required but not configured": {
 			sandboxConfig:  &runtime.PodSandboxConfig{},
 			runtimeHandler: "bar",
-			runtimes: map[string]criconfig.Runtime{
-				criconfig.RuntimeDefault: defaultRuntime,
-				"foo":                    fooRuntime,
-			},
-			expectErr: true,
+			defaultRuntime: defaultRuntime,
+			runtimes:       map[string]criconfig.Runtime{"foo": fooRuntime},
+			expectErr:      true,
 		},
 	} {
 		t.Run(desc, func(t *testing.T) {
@@ -490,7 +756,8 @@ func TestGetSandboxRuntime(t *testing.T) {
 			cri.config = criconfig.Config{
 				PluginConfig: criconfig.DefaultConfig(),
 			}
-			cri.config.ContainerdConfig.DefaultRuntimeName = criconfig.RuntimeDefault
+			cri.config.ContainerdConfig.DefaultRuntime = test.defaultRuntime
+			cri.config.ContainerdConfig.UntrustedWorkloadRuntime = test.untrustedWorkloadRuntime
 			cri.config.ContainerdConfig.Runtimes = test.runtimes
 			r, err := cri.getSandboxRuntime(test.sandboxConfig, test.runtimeHandler)
 			assert.Equal(t, test.expectErr, err != nil)
@@ -498,3 +765,21 @@ func TestGetSandboxRuntime(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxDisableCgroup(t *testing.T) {
+	config, imageConfig, _ := getRunPodSandboxTestData()
+	c := newTestCRIService()
+	c.config.DisableCgroup = true
+	spec, err := c.generateSandboxContainerSpec("test-id", config, imageConfig, "test-cni")
+	require.NoError(t, err)
+
+	t.Log("resource limit should not be set")
+	assert.Nil(t, spec.Linux.Resources.Memory)
+	assert.Nil(t, spec.Linux.Resources.CPU)
+
+	t.Log("cgroup path should be empty")
+	assert.Empty(t, spec.Linux.CgroupsPath)
+}
+
+// TODO(random-liu): [P1] Add unit test for different error cases to make sure
+// the function cleans up on error properly.

@@ -1,17 +1,17 @@
 /*
-   Copyright The containerd Authors.
+Copyright 2017 The Kubernetes Authors.
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-       http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 */
 
 package server
@@ -22,9 +22,10 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
 	"golang.org/x/net/context"
-	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
+	api "github.com/containerd/cri/pkg/api/v1"
+	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
 // instrumentedService wraps service with containerd namespace and logs.
@@ -471,6 +472,21 @@ func (in *instrumentedService) UpdateRuntimeConfig(ctx context.Context, r *runti
 	}()
 	res, err = in.c.UpdateRuntimeConfig(ctrdutil.WithNamespace(ctx), r)
 	return res, errdefs.ToGRPC(err)
+}
+
+func (in *instrumentedService) LoadImage(ctx context.Context, r *api.LoadImageRequest) (res *api.LoadImageResponse, err error) {
+	if err := in.checkInitialized(); err != nil {
+		return nil, err
+	}
+	log.G(ctx).Debugf("LoadImage from file %q", r.GetFilePath())
+	defer func() {
+		if err != nil {
+			log.G(ctx).WithError(err).Error("LoadImage failed")
+		} else {
+			log.G(ctx).Debugf("LoadImage returns images %+v", res.GetImages())
+		}
+	}()
+	return in.c.LoadImage(ctrdutil.WithNamespace(ctx), r)
 }
 
 func (in *instrumentedService) ReopenContainerLog(ctx context.Context, r *runtime.ReopenContainerLogRequest) (res *runtime.ReopenContainerLogResponse, err error) {

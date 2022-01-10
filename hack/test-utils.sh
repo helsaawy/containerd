@@ -1,18 +1,18 @@
 #!/bin/bash
 
-#   Copyright The containerd Authors.
-
-#   Licensed under the Apache License, Version 2.0 (the "License");
-#   you may not use this file except in compliance with the License.
-#   You may obtain a copy of the License at
-
-#       http://www.apache.org/licenses/LICENSE-2.0
-
-#   Unless required by applicable law or agreed to in writing, software
-#   distributed under the License is distributed on an "AS IS" BASIS,
-#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#   See the License for the specific language governing permissions and
-#   limitations under the License.
+# Copyright 2017 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 source $(dirname "${BASH_SOURCE[0]}")/utils.sh
 
@@ -23,67 +23,48 @@ CONTAINERD_FLAGS="--log-level=debug "
 
 # Use a configuration file for containerd.
 CONTAINERD_CONFIG_FILE=${CONTAINERD_CONFIG_FILE:-""}
-if [ -z "${CONTAINERD_CONFIG_FILE}" ] && command -v sestatus >/dev/null 2>&1; then
-  selinux_config="/tmp/containerd-config-selinux.toml"
-  cat >${selinux_config} <<<'
-[plugins.cri]
-  enable_selinux = true
-'
-  CONTAINERD_CONFIG_FILE=${CONTAINERD_CONFIG_FILE:-"${selinux_config}"}
-fi
-
-# CONTAINERD_TEST_SUFFIX is the suffix appended to the root/state directory used
-# by test containerd.
-CONTAINERD_TEST_SUFFIX=${CONTAINERD_TEST_SUFFIX:-"-test"}
-# The containerd root directory.
-CONTAINERD_ROOT=${CONTAINERD_ROOT:-"/var/lib/containerd${CONTAINERD_TEST_SUFFIX}"}
-# The containerd state directory.
-CONTAINERD_STATE=${CONTAINERD_STATE:-"/run/containerd${CONTAINERD_TEST_SUFFIX}"}
-# The containerd socket address.
-CONTAINERD_SOCK=${CONTAINERD_SOCK:-unix://${CONTAINERD_STATE}/containerd.sock}
-# The containerd binary name.
-CONTAINERD_BIN=${CONTAINERD_BIN:-"containerd"} # don't need a suffix now
 if [ -f "${CONTAINERD_CONFIG_FILE}" ]; then
   CONTAINERD_FLAGS+="--config ${CONTAINERD_CONFIG_FILE} "
 fi
-CONTAINERD_FLAGS+="--address ${CONTAINERD_SOCK#"unix://"} \
-  --state ${CONTAINERD_STATE} \
-  --root ${CONTAINERD_ROOT}"
 
-containerd_groupid=
+CONTAINERD_SOCK=unix:///run/containerd/containerd.sock
+
+containerd_pid=
 
 # test_setup starts containerd.
 test_setup() {
   local report_dir=$1
   # Start containerd
-  if [ ! -x "bin/containerd" ]; then
+  if [ ! -x "${ROOT}/_output/containerd" ]; then
     echo "containerd is not built"
     exit 1
   fi
-  set -m
-  # Create containerd in a different process group
-  # so that we can easily clean them up.
-  keepalive "sudo PATH=${PATH} bin/containerd ${CONTAINERD_FLAGS}" \
+  sudo pkill -x containerd
+  keepalive "sudo PATH=${PATH} ${ROOT}/_output/containerd ${CONTAINERD_FLAGS}" \
     ${RESTART_WAIT_PERIOD} &> ${report_dir}/containerd.log &
-  pid=$!
-  set +m
-  containerd_groupid=$(ps -o pgid= -p ${pid})
+  containerd_pid=$!
   # Wait for containerd to be running by using the containerd client ctr to check the version
   # of the containerd server. Wait an increasing amount of time after each of five attempts
+  local -r ctr_path=$(which ctr)
+  if [ -z "${ctr_path}" ]; then
+    echo "ctr is not in PATH"
+    exit 1
+  fi
   local -r crictl_path=$(which crictl)
   if [ -z "${crictl_path}" ]; then
     echo "crictl is not in PATH"
     exit 1
   fi
-  readiness_check "sudo bin/ctr --address ${CONTAINERD_SOCK#"unix://"} version"
+  readiness_check "sudo ${ctr_path} version"
   readiness_check "sudo ${crictl_path} --runtime-endpoint=${CONTAINERD_SOCK} info"
 }
 
 # test_teardown kills containerd.
 test_teardown() {
-  if [ -n "${containerd_groupid}" ]; then
-    sudo pkill -g ${containerd_groupid}
+  if [ -n "${containerd_pid}" ]; then
+    kill ${containerd_pid}
   fi
+  sudo pkill -x containerd
 }
 
 # keepalive runs a command and keeps it alive.
