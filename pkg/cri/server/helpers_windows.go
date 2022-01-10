@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 /*
@@ -20,7 +21,7 @@ package server
 
 import (
 	runhcsoptions "github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
-	criconfig "github.com/containerd/cri/pkg/config"
+	criconfig "github.com/containerd/containerd/pkg/cri/config"
 	"github.com/pkg/errors"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )

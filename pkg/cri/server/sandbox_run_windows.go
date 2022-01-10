@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 /*
@@ -28,14 +29,14 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/oci"
+	"github.com/containerd/containerd/pkg/cri/annotations"
+	criconfig "github.com/containerd/containerd/pkg/cri/config"
+	"github.com/containerd/containerd/pkg/cri/netns"
+	customopts "github.com/containerd/containerd/pkg/cri/opts"
+	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
+	"github.com/containerd/containerd/pkg/cri/util"
+	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 	"github.com/containerd/containerd/snapshots"
-	"github.com/containerd/cri/pkg/annotations"
-	criconfig "github.com/containerd/cri/pkg/config"
-	customopts "github.com/containerd/cri/pkg/containerd/opts"
-	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
-	"github.com/containerd/cri/pkg/netns"
-	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
-	"github.com/containerd/cri/pkg/util"
 	"github.com/davecgh/go-spew/spew"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"

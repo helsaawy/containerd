@@ -24,7 +24,7 @@ import (
 	"github.com/docker/distribution/digestset"
 	assertlib "github.com/stretchr/testify/assert"
 
-	storeutil "github.com/containerd/cri/pkg/store"
+	storeutil "github.com/containerd/containerd/pkg/cri/store"
 )
 
 func TestInternalStore(t *testing.T) {

@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 /*
@@ -21,7 +22,7 @@ package server
 import (
 	"github.com/containerd/cgroups"
 	"github.com/containerd/containerd/api/types"
-	containerstore "github.com/containerd/cri/pkg/store/container"
+	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
 	"github.com/containerd/typeurl"
 	"github.com/pkg/errors"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"

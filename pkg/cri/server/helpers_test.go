@@ -30,9 +30,9 @@ import (
 	"github.com/stretchr/testify/require"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	criconfig "github.com/containerd/cri/pkg/config"
-	"github.com/containerd/cri/pkg/store"
-	imagestore "github.com/containerd/cri/pkg/store/image"
+	criconfig "github.com/containerd/containerd/pkg/cri/config"
+	"github.com/containerd/containerd/pkg/cri/store"
+	imagestore "github.com/containerd/containerd/pkg/cri/store/image"
 )
 
 // TestGetUserFromImage tests the logic of getting image uid or user name of image user.

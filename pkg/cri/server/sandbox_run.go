@@ -28,14 +28,14 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"github.com/containerd/cri/pkg/annotations"
-	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
+	"github.com/containerd/containerd/pkg/cri/annotations"
+	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
 func init() {
 	typeurl.Register(&sandboxstore.Metadata{},
-		"github.com/containerd/cri/pkg/store/sandbox", "Metadata")
+		"github.com/containerd/containerd/pkg/cri/store/sandbox", "Metadata")
 }
 
 // parseDNSOptions parse DNS options into resolv.conf format content,

@@ -30,10 +30,10 @@ import (
 	"golang.org/x/net/context"
 	"k8s.io/client-go/tools/remotecommand"
 
-	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
-	cioutil "github.com/containerd/cri/pkg/ioutil"
-	cio "github.com/containerd/cri/pkg/server/io"
-	"github.com/containerd/cri/pkg/util"
+	cioutil "github.com/containerd/containerd/pkg/cri/ioutil"
+	cio "github.com/containerd/containerd/pkg/cri/server/io"
+	"github.com/containerd/containerd/pkg/cri/util"
+	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 

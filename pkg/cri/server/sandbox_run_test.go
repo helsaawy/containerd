@@ -30,10 +30,10 @@ import (
 	"github.com/stretchr/testify/require"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	"github.com/containerd/cri/pkg/annotations"
-	criconfig "github.com/containerd/cri/pkg/config"
-	ostesting "github.com/containerd/cri/pkg/os/testing"
-	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
+	"github.com/containerd/containerd/pkg/cri/annotations"
+	criconfig "github.com/containerd/containerd/pkg/cri/config"
+	ostesting "github.com/containerd/containerd/pkg/cri/os/testing"
+	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
 )
 
 func getRunPodSandboxTestData() (*runtime.PodSandboxConfig, *imagespec.ImageConfig, func(*testing.T, string, *runtimespec.Spec)) {

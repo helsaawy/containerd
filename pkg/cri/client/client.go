@@ -22,7 +22,7 @@ import (
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 
-	api "github.com/containerd/cri/pkg/api/v1"
+	api "github.com/containerd/containerd/pkg/cri/api/v1"
 )
 
 // NewCRIPluginClient creates grpc client of cri plugin

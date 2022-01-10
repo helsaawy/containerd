@@ -23,8 +23,8 @@ import (
 	"github.com/containerd/containerd/log"
 	"golang.org/x/net/context"
 
-	api "github.com/containerd/cri/pkg/api/v1"
-	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
+	api "github.com/containerd/containerd/pkg/cri/api/v1"
+	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 

@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 /*
@@ -43,12 +44,12 @@ import (
 	"golang.org/x/sys/unix"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	"github.com/containerd/cri/pkg/annotations"
-	customopts "github.com/containerd/cri/pkg/containerd/opts"
-	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
-	cio "github.com/containerd/cri/pkg/server/io"
-	containerstore "github.com/containerd/cri/pkg/store/container"
-	"github.com/containerd/cri/pkg/util"
+	"github.com/containerd/containerd/pkg/cri/annotations"
+	customopts "github.com/containerd/containerd/pkg/cri/opts"
+	cio "github.com/containerd/containerd/pkg/cri/server/io"
+	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
+	"github.com/containerd/containerd/pkg/cri/util"
+	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 )
 
 const (

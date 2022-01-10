@@ -19,8 +19,8 @@ package server
 import (
 	tasks "github.com/containerd/containerd/api/services/tasks/v1"
 	"github.com/containerd/containerd/api/types"
-	containerstore "github.com/containerd/cri/pkg/store/container"
-	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
+	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
+	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"

@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 /*
@@ -35,14 +36,14 @@ import (
 	"golang.org/x/sys/unix"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	"github.com/containerd/cri/pkg/annotations"
-	criconfig "github.com/containerd/cri/pkg/config"
-	customopts "github.com/containerd/cri/pkg/containerd/opts"
-	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
-	"github.com/containerd/cri/pkg/log"
-	"github.com/containerd/cri/pkg/netns"
-	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
-	"github.com/containerd/cri/pkg/util"
+	"github.com/containerd/containerd/pkg/cri/annotations"
+	criconfig "github.com/containerd/containerd/pkg/cri/config"
+	"github.com/containerd/containerd/pkg/cri/log"
+	"github.com/containerd/containerd/pkg/cri/netns"
+	customopts "github.com/containerd/containerd/pkg/cri/opts"
+	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
+	"github.com/containerd/containerd/pkg/cri/util"
+	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 )
 
 // RunPodSandbox creates and starts a pod-level sandbox. Runtimes should ensure

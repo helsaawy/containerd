@@ -22,8 +22,8 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/docker/docker/pkg/truncindex"
 
-	"github.com/containerd/cri/pkg/netns"
-	"github.com/containerd/cri/pkg/store"
+	"github.com/containerd/containerd/pkg/cri/netns"
+	"github.com/containerd/containerd/pkg/cri/store"
 )
 
 // Sandbox contains all resources associated with the sandbox. All methods to

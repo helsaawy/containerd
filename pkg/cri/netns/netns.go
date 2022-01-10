@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 /*
@@ -45,7 +46,7 @@ import (
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
 
-	osinterface "github.com/containerd/cri/pkg/os"
+	osinterface "github.com/containerd/containerd/pkg/cri/os"
 )
 
 const nsRunDir = "/var/run/netns"

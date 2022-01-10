@@ -36,16 +36,16 @@ import (
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 	"k8s.io/kubernetes/pkg/kubelet/server/streaming"
 
-	api "github.com/containerd/cri/pkg/api/v1"
-	"github.com/containerd/cri/pkg/atomic"
-	criconfig "github.com/containerd/cri/pkg/config"
-	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
-	osinterface "github.com/containerd/cri/pkg/os"
-	"github.com/containerd/cri/pkg/registrar"
-	containerstore "github.com/containerd/cri/pkg/store/container"
-	imagestore "github.com/containerd/cri/pkg/store/image"
-	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
-	snapshotstore "github.com/containerd/cri/pkg/store/snapshot"
+	"github.com/containerd/containerd/pkg/atomic"
+	api "github.com/containerd/containerd/pkg/cri/api/v1"
+	criconfig "github.com/containerd/containerd/pkg/cri/config"
+	osinterface "github.com/containerd/containerd/pkg/cri/os"
+	"github.com/containerd/containerd/pkg/cri/registrar"
+	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
+	imagestore "github.com/containerd/containerd/pkg/cri/store/image"
+	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
+	snapshotstore "github.com/containerd/containerd/pkg/cri/store/snapshot"
+	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 )
 
 // grpcServices are all the grpc services provided by cri containerd.

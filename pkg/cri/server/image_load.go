@@ -24,8 +24,8 @@ import (
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 
-	api "github.com/containerd/cri/pkg/api/v1"
-	"github.com/containerd/cri/pkg/containerd/importer"
+	api "github.com/containerd/containerd/pkg/cri/api/v1"
+	"github.com/containerd/containerd/pkg/cri/importer"
 )
 
 // LoadImage loads a image into containerd.

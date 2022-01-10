@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 /*
@@ -24,7 +25,7 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/pkg/errors"
 
-	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
+	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
 )
 
 func (c *criService) doStopPodSandbox(ctx context.Context, id string, sandbox sandboxstore.Sandbox) error {
