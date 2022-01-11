@@ -20,8 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"context"
+
 	"github.com/stretchr/testify/assert"
-	"golang.org/x/net/context"
 
 	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
 )

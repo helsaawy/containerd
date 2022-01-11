@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 /*
@@ -22,8 +23,8 @@ import (
 	"io"
 	"os"
 
+	"context"
 	"github.com/containerd/fifo"
-	"golang.org/x/net/context"
 )
 
 func openPipe(ctx context.Context, fn string, flag int, perm os.FileMode) (io.ReadWriteCloser, error) {

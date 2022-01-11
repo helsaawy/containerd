@@ -19,10 +19,11 @@ package server
 import (
 	"io"
 
+	"context"
+
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/log"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 	"k8s.io/client-go/tools/remotecommand"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
@@ -60,7 +61,7 @@ func (c *criService) attachContainer(ctx context.Context, id string, stdin io.Re
 	if err != nil {
 		return errors.Wrap(err, "failed to load task")
 	}
-	handleResizing(resize, func(size remotecommand.TerminalSize) {
+	handleResizing(ctx, resize, func(size remotecommand.TerminalSize) {
 		if err := task.Resize(ctx, uint32(size.Width), uint32(size.Height)); err != nil {
 			log.G(ctx).WithError(err).Errorf("Failed to resize task %q console", id)
 		}

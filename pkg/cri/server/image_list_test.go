@@ -19,10 +19,11 @@ package server
 import (
 	"testing"
 
+	"context"
+
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
 	imagestore "github.com/containerd/containerd/pkg/cri/store/image"

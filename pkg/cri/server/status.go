@@ -22,9 +22,10 @@ import (
 	goruntime "runtime"
 	osruntime "runtime"
 
+	"context"
+
 	"github.com/containerd/containerd/log"
 	cni "github.com/containerd/go-cni"
-	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 

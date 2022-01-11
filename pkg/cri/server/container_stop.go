@@ -17,15 +17,15 @@ limitations under the License.
 package server
 
 import (
+	"context"
 	"syscall"
 	"time"
 
-	"github.com/containerd/containerd"
 	eventtypes "github.com/containerd/containerd/api/events"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
+	"github.com/moby/sys/signal"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 
 	"github.com/containerd/containerd/pkg/cri/store"
 	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
@@ -134,12 +134,7 @@ func (c *criService) stopContainer(ctx context.Context, container containerstore
 			}
 		}
 
-		sandboxPlatform, err := c.getSandboxPlatform(container.Metadata.SandboxID)
-		if err != nil {
-			return errors.Wrapf(err, "failed to get container's sandbox platform")
-		}
-
-		sig, err := containerd.ParsePlatformSignal(stopSignal, sandboxPlatform)
+		sig, err := signal.ParseSignal(stopSignal)
 		if err != nil {
 			return errors.Wrapf(err, "failed to parse stop signal %q", stopSignal)
 		}

@@ -17,8 +17,9 @@ limitations under the License.
 package server
 
 import (
+	"context"
+
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
 	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"

@@ -22,10 +22,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"context"
+
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
 	criconfig "github.com/containerd/containerd/pkg/cri/config"

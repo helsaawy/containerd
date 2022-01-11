@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 /*
@@ -23,10 +24,11 @@ import (
 	"net"
 	"sync"
 
+	"context"
+
 	winio "github.com/Microsoft/go-winio"
 	"github.com/containerd/containerd/cio"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 // delayedConnection is a io.ReadWriteCloser that takes a net.Listener, calls Accept on it, and

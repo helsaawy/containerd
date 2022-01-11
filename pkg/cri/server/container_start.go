@@ -21,13 +21,15 @@ import (
 	"net/url"
 	"time"
 
+	"context"
+
 	"github.com/containerd/containerd"
 	containerdio "github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/plugin"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
 	cioutil "github.com/containerd/containerd/pkg/cri/ioutil"
@@ -100,7 +102,7 @@ func (c *criService) StartContainer(ctx context.Context, r *runtime.StartContain
 
 	var taskOpts []containerd.NewTaskOpts
 	// TODO(random-liu): Remove this after shim v1 is deprecated.
-	if c.config.NoPivot && ctrInfo.Runtime.Name == linuxRuntime {
+	if c.config.NoPivot && ctrInfo.Runtime.Name == plugin.RuntimeLinuxV1 {
 		taskOpts = addOptWithNoPivotRoot(taskOpts)
 	}
 	task, err := container.NewTask(ctx, ioCreation, taskOpts...)

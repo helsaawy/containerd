@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	"context"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -29,9 +30,7 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/typeurl"
-	"github.com/docker/docker/pkg/system"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
 	"github.com/containerd/containerd/pkg/cri/netns"
@@ -47,7 +46,7 @@ import (
 // 2) Containerd containers may be deleted, but SHOULD NOT be added. Or else, recovery logic
 // for the newly added container/sandbox will return error, because there is no corresponding root
 // directory created.
-// 3) Containerd container tasks may exit or be stoppped, deleted. Even though current logic could
+// 3) Containerd container tasks may exit or be stopped, deleted. Even though current logic could
 // tolerant tasks being created or started, we prefer that not to happen.
 
 // recover recovers system state from containerd and status checkpoint.
@@ -483,7 +482,7 @@ func cleanupOrphanedIDDirs(ctx context.Context, cntrs []containerd.Container, ba
 			continue
 		}
 		dir := filepath.Join(base, d.Name())
-		if err := system.EnsureRemoveAll(dir); err != nil {
+		if err := ensureRemoveAll(ctx, dir); err != nil {
 			log.G(ctx).WithError(err).Warnf("Failed to remove id directory %q", dir)
 		} else {
 			log.G(ctx).Debugf("Cleanup orphaned id directory %q", dir)

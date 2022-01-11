@@ -20,9 +20,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"context"
+
 	"github.com/containerd/containerd/log"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 
 	api "github.com/containerd/containerd/pkg/cri/api/v1"
 	"github.com/containerd/containerd/pkg/cri/importer"

@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"context"
+
 	"github.com/containerd/containerd"
 	eventtypes "github.com/containerd/containerd/api/events"
 	containerdio "github.com/containerd/containerd/cio"
@@ -29,7 +31,6 @@ import (
 	gogotypes "github.com/gogo/protobuf/types"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 	"k8s.io/apimachinery/pkg/util/clock"
 
 	"github.com/containerd/containerd/pkg/cri/constants"

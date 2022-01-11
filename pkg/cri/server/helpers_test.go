@@ -1,38 +1,43 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+   Copyright The containerd Authors.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+       http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 */
 
 package server
 
 import (
-	"sort"
+	"context"
+	"os"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/BurntSushi/toml"
+	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/oci"
+	criconfig "github.com/containerd/containerd/pkg/cri/config"
+	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
+	imagestore "github.com/containerd/containerd/pkg/cri/store/image"
+	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/reference/docker"
 	"github.com/containerd/containerd/runtime/linux/runctypes"
 	runcoptions "github.com/containerd/containerd/runtime/v2/runc/options"
-	"github.com/docker/distribution/reference"
+
 	imagedigest "github.com/opencontainers/go-digest"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/pelletier/go-toml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
-
-	criconfig "github.com/containerd/containerd/pkg/cri/config"
-	"github.com/containerd/containerd/pkg/cri/store"
-	imagestore "github.com/containerd/containerd/pkg/cri/store/image"
 )
 
 // TestGetUserFromImage tests the logic of getting image uid or user name of image user.
@@ -54,7 +59,7 @@ func TestGetUserFromImage(t *testing.T) {
 		"empty user": {
 			user: "",
 		},
-		"multiple spearators": {
+		"multiple separators": {
 			user: "1:2:3",
 			uid:  newI64(1),
 		},
@@ -97,7 +102,7 @@ func TestGetRepoDigestAndTag(t *testing.T) {
 			expectedRepoDigest: "",
 			expectedRepoTag:    "gcr.io/library/busybox:latest",
 		},
-		"repo digest should not be empty if orignal ref is schema1 but has digest": {
+		"repo digest should not be empty if original ref is schema1 but has digest": {
 			ref:                "gcr.io/library/busybox@sha256:e6693c20186f837fc393390135d8a598a96a833917917789d63766cab6c59594",
 			schema1:            true,
 			expectedRepoDigest: "gcr.io/library/busybox@sha256:e6693c20186f837fc393390135d8a598a96a833917917789d63766cab6c59594",
@@ -105,7 +110,7 @@ func TestGetRepoDigestAndTag(t *testing.T) {
 		},
 	} {
 		t.Logf("TestCase %q", desc)
-		named, err := reference.ParseDockerRef(test.ref)
+		named, err := docker.ParseDockerRef(test.ref)
 		assert.NoError(t, err)
 		repoDigest, repoTag := getRepoDigestAndTag(named, digest, test.schema1)
 		assert.Equal(t, test.expectedRepoDigest, repoDigest)
@@ -113,65 +118,27 @@ func TestGetRepoDigestAndTag(t *testing.T) {
 	}
 }
 
-func TestGetCgroupsPath(t *testing.T) {
-	testID := "test-id"
-	for desc, test := range map[string]struct {
-		cgroupsParent string
-		systemdCgroup bool
-		expected      string
-	}{
-		"should support regular cgroup path": {
-			cgroupsParent: "/a/b",
-			systemdCgroup: false,
-			expected:      "/a/b/test-id",
-		},
-		"should support systemd cgroup path": {
-			cgroupsParent: "/a.slice/b.slice",
-			systemdCgroup: true,
-			expected:      "b.slice:cri-containerd:test-id",
-		},
-	} {
-		t.Logf("TestCase %q", desc)
-		got := getCgroupsPath(test.cgroupsParent, testID, test.systemdCgroup)
-		assert.Equal(t, test.expected, got)
-	}
-}
-
 func TestBuildLabels(t *testing.T) {
+	imageConfigLabels := map[string]string{
+		"a":          "z",
+		"d":          "y",
+		"long-label": strings.Repeat("example", 10000),
+	}
 	configLabels := map[string]string{
 		"a": "b",
 		"c": "d",
 	}
-	newLabels := buildLabels(configLabels, containerKindSandbox)
-	assert.Len(t, newLabels, 3)
+	newLabels := buildLabels(configLabels, imageConfigLabels, containerKindSandbox)
+	assert.Len(t, newLabels, 4)
 	assert.Equal(t, "b", newLabels["a"])
 	assert.Equal(t, "d", newLabels["c"])
+	assert.Equal(t, "y", newLabels["d"])
 	assert.Equal(t, containerKindSandbox, newLabels[containerKindLabel])
+	assert.NotContains(t, newLabels, "long-label")
 
 	newLabels["a"] = "e"
 	assert.Empty(t, configLabels[containerKindLabel], "should not add new labels into original label")
 	assert.Equal(t, "b", configLabels["a"], "change in new labels should not affect original label")
-}
-
-func TestOrderedMounts(t *testing.T) {
-	mounts := []*runtime.Mount{
-		{ContainerPath: "/a/b/c"},
-		{ContainerPath: "/a/b"},
-		{ContainerPath: "/a/b/c/d"},
-		{ContainerPath: "/a"},
-		{ContainerPath: "/b"},
-		{ContainerPath: "/b/c"},
-	}
-	expected := []*runtime.Mount{
-		{ContainerPath: "/a"},
-		{ContainerPath: "/b"},
-		{ContainerPath: "/a/b"},
-		{ContainerPath: "/b/c"},
-		{ContainerPath: "/a/b/c"},
-		{ContainerPath: "/a/b/c/d"},
-	}
-	sort.Stable(orderedMounts(mounts))
-	assert.Equal(t, expected, mounts)
 }
 
 func TestParseImageReferences(t *testing.T) {
@@ -225,7 +192,7 @@ func TestLocalResolve(t *testing.T) {
 		assert.Equal(t, image, img)
 	}
 	img, err := c.localResolve("randomid")
-	assert.Equal(t, store.ErrNotExist, err)
+	assert.Equal(t, errdefs.IsNotFound(err), true)
 	assert.Equal(t, imagestore.Image{}, img)
 }
 
@@ -234,47 +201,67 @@ func TestGenerateRuntimeOptions(t *testing.T) {
 systemd_cgroup = true
 [containerd]
   no_pivot = true
-[containerd.default_runtime]
-  runtime_type = "` + linuxRuntime + `"
+  default_runtime_name = "default"
+[containerd.runtimes.legacy]
+  runtime_type = "` + plugin.RuntimeLinuxV1 + `"
 [containerd.runtimes.runc]
-  runtime_type = "` + runcRuntime + `"
+  runtime_type = "` + plugin.RuntimeRuncV1 + `"
+[containerd.runtimes.runcv2]
+  runtime_type = "` + plugin.RuntimeRuncV2 + `"
 `
 	nonNilOpts := `
 systemd_cgroup = true
 [containerd]
   no_pivot = true
-[containerd.default_runtime]
-  runtime_type = "` + linuxRuntime + `"
-[containerd.default_runtime.options]
-  Runtime = "default"
-  RuntimeRoot = "/default"
+  default_runtime_name = "default"
+[containerd.runtimes.legacy]
+  runtime_type = "` + plugin.RuntimeLinuxV1 + `"
+[containerd.runtimes.legacy.options]
+  Runtime = "legacy"
+  RuntimeRoot = "/legacy"
 [containerd.runtimes.runc]
-  runtime_type = "` + runcRuntime + `"
+  runtime_type = "` + plugin.RuntimeRuncV1 + `"
 [containerd.runtimes.runc.options]
   BinaryName = "runc"
   Root = "/runc"
   NoNewKeyring = true
+[containerd.runtimes.runcv2]
+  runtime_type = "` + plugin.RuntimeRuncV2 + `"
+[containerd.runtimes.runcv2.options]
+  BinaryName = "runc"
+  Root = "/runcv2"
+  NoNewKeyring = true
 `
 	var nilOptsConfig, nonNilOptsConfig criconfig.Config
-	_, err := toml.Decode(nilOpts, &nilOptsConfig)
+	tree, err := toml.Load(nilOpts)
 	require.NoError(t, err)
-	_, err = toml.Decode(nonNilOpts, &nonNilOptsConfig)
+	err = tree.Unmarshal(&nilOptsConfig)
 	require.NoError(t, err)
-	require.Len(t, nilOptsConfig.Runtimes, 1)
-	require.Len(t, nonNilOptsConfig.Runtimes, 1)
+	require.Len(t, nilOptsConfig.Runtimes, 3)
+
+	tree, err = toml.Load(nonNilOpts)
+	require.NoError(t, err)
+	err = tree.Unmarshal(&nonNilOptsConfig)
+	require.NoError(t, err)
+	require.Len(t, nonNilOptsConfig.Runtimes, 3)
 
 	for desc, test := range map[string]struct {
 		r               criconfig.Runtime
 		c               criconfig.Config
 		expectedOptions interface{}
 	}{
-		"when options is nil, should return nil option for non legacy runtime": {
+		"when options is nil, should return nil option for io.containerd.runc.v1": {
 			r:               nilOptsConfig.Runtimes["runc"],
 			c:               nilOptsConfig,
 			expectedOptions: nil,
 		},
+		"when options is nil, should return nil option for io.containerd.runc.v2": {
+			r:               nilOptsConfig.Runtimes["runcv2"],
+			c:               nilOptsConfig,
+			expectedOptions: nil,
+		},
 		"when options is nil, should use legacy fields for legacy runtime": {
-			r: nilOptsConfig.DefaultRuntime,
+			r: nilOptsConfig.Runtimes["legacy"],
 			c: nilOptsConfig,
 			expectedOptions: &runctypes.RuncOptions{
 				SystemdCgroup: true,
@@ -289,12 +276,21 @@ systemd_cgroup = true
 				NoNewKeyring: true,
 			},
 		},
+		"when options is not nil, should be able to decode for io.containerd.runc.v2": {
+			r: nonNilOptsConfig.Runtimes["runcv2"],
+			c: nonNilOptsConfig,
+			expectedOptions: &runcoptions.Options{
+				BinaryName:   "runc",
+				Root:         "/runcv2",
+				NoNewKeyring: true,
+			},
+		},
 		"when options is not nil, should be able to decode for legacy runtime": {
-			r: nonNilOptsConfig.DefaultRuntime,
+			r: nonNilOptsConfig.Runtimes["legacy"],
 			c: nonNilOptsConfig,
 			expectedOptions: &runctypes.RuncOptions{
-				Runtime:     "default",
-				RuntimeRoot: "/default",
+				Runtime:     "legacy",
+				RuntimeRoot: "/legacy",
 			},
 		},
 	} {
@@ -306,33 +302,12 @@ systemd_cgroup = true
 	}
 }
 
-func TestRestrictOOMScoreAdj(t *testing.T) {
-	current, err := getCurrentOOMScoreAdj()
-	require.NoError(t, err)
-
-	got, err := restrictOOMScoreAdj(current - 1)
-	require.NoError(t, err)
-	assert.Equal(t, got, current)
-
-	got, err = restrictOOMScoreAdj(current)
-	require.NoError(t, err)
-	assert.Equal(t, got, current)
-
-	got, err = restrictOOMScoreAdj(current + 1)
-	require.NoError(t, err)
-	assert.Equal(t, got, current+1)
-}
-
-func TestCustomGenerator(t *testing.T) {
+func TestEnvDeduplication(t *testing.T) {
 	for desc, test := range map[string]struct {
-		existing  []string
-		kv        [][2]string
-		expected  []string
-		expectNil bool
+		existing []string
+		kv       [][2]string
+		expected []string
 	}{
-		"empty": {
-			expectNil: true,
-		},
 		"single env": {
 			kv: [][2]string{
 				{"a", "b"},
@@ -387,22 +362,243 @@ func TestCustomGenerator(t *testing.T) {
 		},
 	} {
 		t.Logf("TestCase %q", desc)
-		var spec *runtimespec.Spec
+		var spec runtimespec.Spec
 		if len(test.existing) > 0 {
-			spec = &runtimespec.Spec{
-				Process: &runtimespec.Process{
-					Env: test.existing,
-				},
+			spec.Process = &runtimespec.Process{
+				Env: test.existing,
 			}
 		}
-		g := newSpecGenerator(spec)
 		for _, kv := range test.kv {
-			g.AddProcessEnv(kv[0], kv[1])
+			oci.WithEnv([]string{kv[0] + "=" + kv[1]})(context.Background(), nil, nil, &spec)
 		}
-		if test.expectNil {
-			assert.Nil(t, g.Config)
-		} else {
-			assert.Equal(t, test.expected, g.Config.Process.Env)
-		}
+		assert.Equal(t, test.expected, spec.Process.Env)
 	}
+}
+
+func TestPassThroughAnnotationsFilter(t *testing.T) {
+	for desc, test := range map[string]struct {
+		podAnnotations         map[string]string
+		runtimePodAnnotations  []string
+		passthroughAnnotations map[string]string
+	}{
+		"should support direct match": {
+			podAnnotations:         map[string]string{"c": "d", "d": "e"},
+			runtimePodAnnotations:  []string{"c"},
+			passthroughAnnotations: map[string]string{"c": "d"},
+		},
+		"should support wildcard match": {
+			podAnnotations: map[string]string{
+				"t.f":  "j",
+				"z.g":  "o",
+				"z":    "o",
+				"y.ca": "b",
+				"y":    "b",
+			},
+			runtimePodAnnotations: []string{"*.f", "z*g", "y.c*"},
+			passthroughAnnotations: map[string]string{
+				"t.f":  "j",
+				"z.g":  "o",
+				"y.ca": "b",
+			},
+		},
+		"should support wildcard match all": {
+			podAnnotations: map[string]string{
+				"t.f":  "j",
+				"z.g":  "o",
+				"z":    "o",
+				"y.ca": "b",
+				"y":    "b",
+			},
+			runtimePodAnnotations: []string{"*"},
+			passthroughAnnotations: map[string]string{
+				"t.f":  "j",
+				"z.g":  "o",
+				"z":    "o",
+				"y.ca": "b",
+				"y":    "b",
+			},
+		},
+		"should support match including path separator": {
+			podAnnotations: map[string]string{
+				"matchend.com/end":    "1",
+				"matchend.com/end1":   "2",
+				"matchend.com/1end":   "3",
+				"matchmid.com/mid":    "4",
+				"matchmid.com/mi1d":   "5",
+				"matchmid.com/mid1":   "6",
+				"matchhead.com/head":  "7",
+				"matchhead.com/1head": "8",
+				"matchhead.com/head1": "9",
+				"matchall.com/abc":    "10",
+				"matchall.com/def":    "11",
+				"end/matchend":        "12",
+				"end1/matchend":       "13",
+				"1end/matchend":       "14",
+				"mid/matchmid":        "15",
+				"mi1d/matchmid":       "16",
+				"mid1/matchmid":       "17",
+				"head/matchhead":      "18",
+				"1head/matchhead":     "19",
+				"head1/matchhead":     "20",
+				"abc/matchall":        "21",
+				"def/matchall":        "22",
+				"match1/match2":       "23",
+				"nomatch/nomatch":     "24",
+			},
+			runtimePodAnnotations: []string{
+				"matchend.com/end*",
+				"matchmid.com/mi*d",
+				"matchhead.com/*head",
+				"matchall.com/*",
+				"end*/matchend",
+				"mi*d/matchmid",
+				"*head/matchhead",
+				"*/matchall",
+				"match*/match*",
+			},
+			passthroughAnnotations: map[string]string{
+				"matchend.com/end":    "1",
+				"matchend.com/end1":   "2",
+				"matchmid.com/mid":    "4",
+				"matchmid.com/mi1d":   "5",
+				"matchhead.com/head":  "7",
+				"matchhead.com/1head": "8",
+				"matchall.com/abc":    "10",
+				"matchall.com/def":    "11",
+				"end/matchend":        "12",
+				"end1/matchend":       "13",
+				"mid/matchmid":        "15",
+				"mi1d/matchmid":       "16",
+				"head/matchhead":      "18",
+				"1head/matchhead":     "19",
+				"abc/matchall":        "21",
+				"def/matchall":        "22",
+				"match1/match2":       "23",
+			},
+		},
+	} {
+		t.Run(desc, func(t *testing.T) {
+			passthroughAnnotations := getPassthroughAnnotations(test.podAnnotations, test.runtimePodAnnotations)
+			assert.Equal(t, test.passthroughAnnotations, passthroughAnnotations)
+		})
+	}
+}
+
+func TestEnsureRemoveAllNotExist(t *testing.T) {
+	// should never return an error for a non-existent path
+	if err := ensureRemoveAll(context.Background(), "/non/existent/path"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureRemoveAllWithDir(t *testing.T) {
+	dir, err := os.MkdirTemp("", "test-ensure-removeall-with-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureRemoveAll(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureRemoveAllWithFile(t *testing.T) {
+	tmp, err := os.CreateTemp("", "test-ensure-removeall-with-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp.Close()
+	if err := ensureRemoveAll(context.Background(), tmp.Name()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Helper function for setting up an environment to test PID namespace targeting.
+func addContainer(c *criService, containerID, sandboxID string, PID uint32, createdAt, startedAt, finishedAt int64) error {
+	meta := containerstore.Metadata{
+		ID:        containerID,
+		SandboxID: sandboxID,
+	}
+	status := containerstore.Status{
+		Pid:        PID,
+		CreatedAt:  createdAt,
+		StartedAt:  startedAt,
+		FinishedAt: finishedAt,
+	}
+	container, err := containerstore.NewContainer(meta,
+		containerstore.WithFakeStatus(status),
+	)
+	if err != nil {
+		return err
+	}
+	return c.containerStore.Add(container)
+}
+
+func TestValidateTargetContainer(t *testing.T) {
+	testSandboxID := "test-sandbox-uid"
+
+	// The existing container that will be targeted.
+	testTargetContainerID := "test-target-container"
+	testTargetContainerPID := uint32(4567)
+
+	// A container that has finished running and cannot be targeted.
+	testStoppedContainerID := "stopped-target-container"
+	testStoppedContainerPID := uint32(6789)
+
+	// A container from another pod.
+	testOtherContainerSandboxID := "other-sandbox-uid"
+	testOtherContainerID := "other-target-container"
+	testOtherContainerPID := uint32(7890)
+
+	// Container create/start/stop times.
+	createdAt := time.Now().Add(-15 * time.Second).UnixNano()
+	startedAt := time.Now().Add(-10 * time.Second).UnixNano()
+	finishedAt := time.Now().Add(-5 * time.Second).UnixNano()
+
+	c := newTestCRIService()
+
+	// Create a target container.
+	err := addContainer(c, testTargetContainerID, testSandboxID, testTargetContainerPID, createdAt, startedAt, 0)
+	require.NoError(t, err, "error creating test target container")
+
+	// Create a stopped container.
+	err = addContainer(c, testStoppedContainerID, testSandboxID, testStoppedContainerPID, createdAt, startedAt, finishedAt)
+	require.NoError(t, err, "error creating test stopped container")
+
+	// Create a container in another pod.
+	err = addContainer(c, testOtherContainerID, testOtherContainerSandboxID, testOtherContainerPID, createdAt, startedAt, 0)
+	require.NoError(t, err, "error creating test container in other pod")
+
+	for desc, test := range map[string]struct {
+		targetContainerID string
+		expectError       bool
+	}{
+		"target container in pod": {
+			targetContainerID: testTargetContainerID,
+			expectError:       false,
+		},
+		"target stopped container in pod": {
+			targetContainerID: testStoppedContainerID,
+			expectError:       true,
+		},
+		"target container does not exist": {
+			targetContainerID: "no-container-with-this-id",
+			expectError:       true,
+		},
+		"target container in other pod": {
+			targetContainerID: testOtherContainerID,
+			expectError:       true,
+		},
+	} {
+		t.Run(desc, func(t *testing.T) {
+			targetContainer, err := c.validateTargetContainer(testSandboxID, test.targetContainerID)
+			if test.expectError {
+				require.Error(t, err, "target should have been invalid but no error")
+				return
+			}
+			require.NoErrorf(t, err, "target should have been valid but got error")
+
+			assert.Equal(t, test.targetContainerID, targetContainer.ID, "returned target container does not have expected ID")
+		})
+	}
+
 }

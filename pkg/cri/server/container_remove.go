@@ -1,17 +1,17 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+   Copyright The containerd Authors.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+       http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 */
 
 package server
@@ -20,21 +20,20 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
-	"github.com/docker/docker/pkg/system"
+	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
+
+	"context"
+
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
-
-	"github.com/containerd/containerd/pkg/cri/store"
-	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
 )
 
 // RemoveContainer removes the container.
 func (c *criService) RemoveContainer(ctx context.Context, r *runtime.RemoveContainerRequest) (_ *runtime.RemoveContainerResponse, retErr error) {
 	container, err := c.containerStore.Get(r.GetContainerId())
 	if err != nil {
-		if err != store.ErrNotExist {
+		if !errdefs.IsNotFound(err) {
 			return nil, errors.Wrapf(err, "an error occurred when try to find container %q", r.GetContainerId())
 		}
 		// Do not return error if container metadata doesn't exist.
@@ -87,12 +86,12 @@ func (c *criService) RemoveContainer(ctx context.Context, r *runtime.RemoveConta
 	}
 
 	containerRootDir := c.getContainerRootDir(id)
-	if err := system.EnsureRemoveAll(containerRootDir); err != nil {
+	if err := ensureRemoveAll(ctx, containerRootDir); err != nil {
 		return nil, errors.Wrapf(err, "failed to remove container root directory %q",
 			containerRootDir)
 	}
 	volatileContainerRootDir := c.getVolatileContainerRootDir(id)
-	if err := system.EnsureRemoveAll(volatileContainerRootDir); err != nil {
+	if err := ensureRemoveAll(ctx, volatileContainerRootDir); err != nil {
 		return nil, errors.Wrapf(err, "failed to remove volatile container root directory %q",
 			volatileContainerRootDir)
 	}

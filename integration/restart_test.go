@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -22,11 +23,11 @@ import (
 	"sort"
 	"testing"
 
+	"context"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 

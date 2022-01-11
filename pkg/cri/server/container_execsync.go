@@ -22,12 +22,13 @@ import (
 	"syscall"
 	"time"
 
+	"context"
+
 	"github.com/containerd/containerd"
 	containerdio "github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 	"k8s.io/client-go/tools/remotecommand"
 
 	cioutil "github.com/containerd/containerd/pkg/cri/ioutil"

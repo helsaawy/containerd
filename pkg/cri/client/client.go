@@ -35,7 +35,7 @@ func NewCRIPluginClient(ctx context.Context, endpoint string) (api.CRIPluginServ
 	conn, err := grpc.DialContext(ctx, addr,
 		grpc.WithBlock(),
 		grpc.WithInsecure(),
-		grpc.WithDialer(dialer),
+		grpc.WithContextDialer(dialer),
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to dial")

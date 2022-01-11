@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 /*
@@ -18,14 +19,20 @@ limitations under the License.
 
 package config
 
-import "github.com/containerd/containerd"
+import (
+	"os"
+	"path/filepath"
+
+	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/pkg/cri/streaming"
+)
 
 // DefaultConfig returns default configurations of cri plugin.
 func DefaultConfig() PluginConfig {
 	return PluginConfig{
 		CniConfig: CniConfig{
-			NetworkPluginBinDir:       "C:\\Program Files\\containerd\\data\\cni\\bin",
-			NetworkPluginConfDir:      "C:\\Program Files\\containerd\\data\\cni\\config",
+			NetworkPluginBinDir:       filepath.Join(os.Getenv("ProgramFiles"), "containerd", "data", "cni", "bin"),
+			NetworkPluginConfDir:      filepath.Join(os.Getenv("ProgramFiles"), "containerd", "data", "cni", "config"),
 			NetworkPluginConfTemplate: "",
 		},
 		ContainerdConfig: ContainerdConfig{
@@ -38,6 +45,7 @@ func DefaultConfig() PluginConfig {
 		},
 		StreamServerAddress: "127.0.0.1",
 		StreamServerPort:    "0",
+		StreamIdleTimeout:   streaming.DefaultConfig.StreamIdleTimeout.String(), // 4 hour
 		EnableTLSStreaming:  false,
 		X509KeyPairStreaming: X509KeyPairStreaming{
 			TLSKeyFile:  "",

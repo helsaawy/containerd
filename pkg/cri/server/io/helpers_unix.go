@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 /*
@@ -23,9 +24,9 @@ import (
 	"sync"
 	"syscall"
 
+	"context"
 	"github.com/containerd/containerd/cio"
 	"github.com/containerd/fifo"
-	"golang.org/x/net/context"
 )
 
 // newStdioPipes creates actual fifos for stdio.

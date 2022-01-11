@@ -22,8 +22,9 @@ import (
 	"path/filepath"
 	"sync"
 
+	"context"
+
 	"github.com/containerd/containerd/cio"
-	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 

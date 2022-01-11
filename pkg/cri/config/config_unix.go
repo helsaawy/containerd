@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 /*
@@ -18,7 +19,10 @@ limitations under the License.
 
 package config
 
-import "github.com/containerd/containerd"
+import (
+	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/pkg/cri/streaming"
+)
 
 // DefaultConfig returns default configurations of cri plugin.
 func DefaultConfig() PluginConfig {
@@ -39,6 +43,7 @@ func DefaultConfig() PluginConfig {
 		},
 		StreamServerAddress: "127.0.0.1",
 		StreamServerPort:    "0",
+		StreamIdleTimeout:   streaming.DefaultConfig.StreamIdleTimeout.String(), // 4 hour
 		EnableSelinux:       false,
 		EnableTLSStreaming:  false,
 		X509KeyPairStreaming: X509KeyPairStreaming{

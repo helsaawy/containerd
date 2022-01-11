@@ -1,17 +1,17 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+   Copyright The containerd Authors.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+       http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 */
 
 package server
@@ -23,15 +23,16 @@ import (
 	"math"
 	"net"
 	"os"
+	"time"
 
 	"github.com/pkg/errors"
 	k8snet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/remotecommand"
 	k8scert "k8s.io/client-go/util/cert"
-	"k8s.io/kubernetes/pkg/kubelet/server/streaming"
 	"k8s.io/utils/exec"
 
+	"github.com/containerd/containerd/pkg/cri/streaming"
 	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 )
 
@@ -65,15 +66,22 @@ func getStreamListenerMode(c *criService) (streamListenerMode, error) {
 	return withoutTLS, nil
 }
 
-func newStreamServer(c *criService, addr, port string) (streaming.Server, error) {
+func newStreamServer(c *criService, addr, port, streamIdleTimeout string) (streaming.Server, error) {
 	if addr == "" {
-		a, err := k8snet.ChooseBindAddress(nil)
+		a, err := k8snet.ResolveBindAddress(nil)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to get stream server address")
 		}
 		addr = a.String()
 	}
 	config := streaming.DefaultConfig
+	if streamIdleTimeout != "" {
+		var err error
+		config.StreamIdleTimeout, err = time.ParseDuration(streamIdleTimeout)
+		if err != nil {
+			return nil, errors.Wrap(err, "invalid stream idle timeout")
+		}
+	}
 	config.Addr = net.JoinHostPort(addr, port)
 	run := newStreamRuntime(c)
 	tlsMode, err := getStreamListenerMode(c)
@@ -148,13 +156,13 @@ func (s *streamRuntime) PortForward(podSandboxID string, port int32, stream io.R
 	if port <= 0 || port > math.MaxUint16 {
 		return errors.Errorf("invalid port %d", port)
 	}
-	return s.c.portForward(context.Background(), podSandboxID, port, stream)
+	ctx := ctrdutil.NamespacedContext()
+	return s.c.portForward(ctx, podSandboxID, port, stream)
 }
 
 // handleResizing spawns a goroutine that processes the resize channel, calling resizeFunc for each
-// remotecommand.TerminalSize received from the channel. The resize channel must be closed elsewhere to stop the
-// goroutine.
-func handleResizing(resize <-chan remotecommand.TerminalSize, resizeFunc func(size remotecommand.TerminalSize)) {
+// remotecommand.TerminalSize received from the channel.
+func handleResizing(ctx context.Context, resize <-chan remotecommand.TerminalSize, resizeFunc func(size remotecommand.TerminalSize)) {
 	if resize == nil {
 		return
 	}
@@ -163,14 +171,18 @@ func handleResizing(resize <-chan remotecommand.TerminalSize, resizeFunc func(si
 		defer runtime.HandleCrash()
 
 		for {
-			size, ok := <-resize
-			if !ok {
+			select {
+			case <-ctx.Done():
 				return
+			case size, ok := <-resize:
+				if !ok {
+					return
+				}
+				if size.Height < 1 || size.Width < 1 {
+					continue
+				}
+				resizeFunc(size)
 			}
-			if size.Height < 1 || size.Width < 1 {
-				continue
-			}
-			resizeFunc(size)
 		}
 	}()
 }

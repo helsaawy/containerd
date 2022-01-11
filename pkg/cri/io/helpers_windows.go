@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 /*
@@ -24,9 +25,10 @@ import (
 	"os"
 	"sync"
 
+	"context"
+
 	winio "github.com/Microsoft/go-winio"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
 )
 
 type pipe struct {

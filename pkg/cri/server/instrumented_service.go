@@ -19,9 +19,10 @@ package server
 import (
 	"errors"
 
+	"context"
+
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
-	"golang.org/x/net/context"
 
 	api "github.com/containerd/containerd/pkg/cri/api/v1"
 	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
