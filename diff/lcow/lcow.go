@@ -35,6 +35,8 @@ import (
 	"github.com/containerd/containerd/metadata"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/typeurl"
+	"github.com/gogo/protobuf/types"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -154,7 +156,24 @@ func (s windowsLcowDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mou
 		}
 	}()
 
-	err = tar2ext4.Convert(rc, outFile, tar2ext4.ConvertWhiteout, tar2ext4.AppendVhdFooter, tar2ext4.MaximumDiskSize(maxLcowVhdSizeGB))
+	t2e4Opts := []tar2ext4.Option{
+		tar2ext4.ConvertWhiteout,
+		tar2ext4.AppendVhdFooter,
+		tar2ext4.MaximumDiskSize(maxLcowVhdSizeGB),
+	}
+	if config.ProcessorPayloads != nil {
+		if msg, ok := config.ProcessorPayloads[diff.LCOWLayerIntegrityEnabled]; ok {
+			val, err := typeurl.UnmarshalAny(msg)
+			if err != nil {
+				return emptyDesc, errors.Wrapf(err, "failed to unmarshal processor payloads")
+			}
+			if str, ok := val.(*types.StringValue); ok && str.Value == "true" {
+				t2e4Opts = append(t2e4Opts, tar2ext4.AppendDMVerity)
+			}
+		}
+	}
+
+	err = tar2ext4.Convert(rc, outFile, t2e4Opts...)
 	if err != nil {
 		return emptyDesc, errors.Wrapf(err, "failed to convert tar2ext4 vhd")
 	}

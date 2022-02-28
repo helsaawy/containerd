@@ -18,10 +18,18 @@ package diff
 
 import (
 	"context"
+	"strings"
 
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/typeurl"
 	"github.com/gogo/protobuf/types"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
+)
+
+const (
+	LabelPrefix               = "containerd.io/diff/"
+	LCOWLayerIntegrityEnabled = LabelPrefix + "io.microsoft.lcow.append-dm-verity"
 )
 
 // Config is used to hold parameters needed for a diff operation
@@ -104,4 +112,46 @@ func WithPayloads(payloads map[string]*types.Any) ApplyOpt {
 		c.ProcessorPayloads = payloads
 		return nil
 	}
+}
+
+// WithStringPayloads marshals string values as types.Any and
+// sets/updates processor payloads
+func WithStringPayloads(labels map[string]string) ApplyOpt {
+	return func(_ context.Context, _ ocispec.Descriptor, c *ApplyConfig) error {
+		if labels == nil {
+			return nil
+		}
+
+		if c.ProcessorPayloads == nil {
+			c.ProcessorPayloads = make(map[string]*types.Any)
+		}
+
+		for k, v := range labels {
+			msg := &types.StringValue{
+				Value: v,
+			}
+			any, err := typeurl.MarshalAny(msg)
+			if err != nil {
+				return errors.Wrap(err, "failed to marshal string")
+			}
+			c.ProcessorPayloads[k] = any
+		}
+		return nil
+	}
+}
+
+// FilterDiffLabels filters the provided labels by removing any key which
+// isn't a diff label. Diff labels have a prefix of "containerd.io/diff/"
+func FilterDiffLabels(labels map[string]string) map[string]string {
+	if labels == nil {
+		return nil
+	}
+
+	filtered := make(map[string]string)
+	for k, v := range labels {
+		if strings.HasPrefix(k, LabelPrefix) {
+			filtered[k] = v
+		}
+	}
+	return filtered
 }

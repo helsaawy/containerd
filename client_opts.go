@@ -19,6 +19,7 @@ package containerd
 import (
 	"time"
 
+	"github.com/containerd/containerd/diff"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes"
@@ -174,6 +175,12 @@ func WithPullLabels(labels map[string]string) RemoteOpt {
 		}
 		return nil
 	}
+}
+
+// WithLCOWLayerIntegrity enables integrity protection of LCOW layers by setting appropriate
+// RemoteContext label
+func WithLCOWLayerIntegrity() RemoteOpt {
+	return WithPullLabel(diff.LCOWLayerIntegrityEnabled, "true")
 }
 
 // WithChildLabelMap sets the map function used to define the labels set
