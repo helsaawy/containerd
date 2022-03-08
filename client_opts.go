@@ -242,3 +242,14 @@ func WithAllMetadata() RemoteOpt {
 		return nil
 	}
 }
+
+// WithDisableSameLayerUnpack sets the option that disallows Containerd from unpacking the same layer in parallel. This helps de-duplicate work
+// if pulling multiple images that share layers.
+func WithDisableSameLayerUnpack() RemoteOpt {
+	return func(client *Client, c *RemoteContext) error {
+		c.DisableSameLayerUnpack = true
+		c.SnapshotterOpts = append(c.SnapshotterOpts,
+			snapshots.WithLabels(map[string]string{"containerd.io/snapshot/disable-same-unpack": ""}))
+		return nil
+	}
+}
