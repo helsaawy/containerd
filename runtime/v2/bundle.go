@@ -18,7 +18,6 @@ package v2
 
 import (
 	"context"
-	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -158,17 +157,4 @@ func (b *Bundle) Delete(ctx context.Context) error {
 		}
 	}
 	return errors.Wrapf(err, "failed to remove both bundle and workdir locations: %v", err2)
-}
-
-// atomicDelete renames the path to a hidden file before removal
-func atomicDelete(path string) error {
-	// create a hidden dir for an atomic removal
-	atomicPath := filepath.Join(filepath.Dir(path), fmt.Sprintf(".%s", filepath.Base(path)))
-	if err := os.Rename(path, atomicPath); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	return os.RemoveAll(atomicPath)
 }
