@@ -161,3 +161,16 @@ func (b *Bundle) Delete(ctx context.Context) error {
 	}
 	return fmt.Errorf("failed to remove both bundle and workdir locations: %v: %w", err2, err)
 }
+
+// atomicDelete renames the path to a hidden file before removal
+func atomicDelete(path string) error {
+	// create a hidden dir for an atomic removal
+	atomicPath := filepath.Join(filepath.Dir(path), fmt.Sprintf(".%s", filepath.Base(path)))
+	if err := os.Rename(path, atomicPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return os.RemoveAll(atomicPath)
+}
