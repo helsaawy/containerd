@@ -14,21 +14,29 @@
    limitations under the License.
 */
 
-package version
+package encryption
 
-import "runtime"
+import "github.com/gogo/protobuf/types"
 
-var (
-	// Package is filled at linking time
-	Package = "github.com/containerd/containerd"
+type anyMap map[string]*types.Any
 
-	// Version holds the complete version number. Filled in at linking time.
-	Version = "1.6.2+unknown"
+type any interface {
+	GetTypeUrl() string
+	GetValue() []byte
+}
 
-	// Revision is filled with the VCS (e.g. git) revision being used to build
-	// the program at linking time.
-	Revision = ""
+func fromAny(from any) *types.Any {
+	if from == nil {
+		return nil
+	}
 
-	// GoVersion is Go tree's version.
-	GoVersion = runtime.Version()
-)
+	pbany, ok := from.(*types.Any)
+	if ok {
+		return pbany
+	}
+
+	return &types.Any{
+		TypeUrl: from.GetTypeUrl(),
+		Value:   from.GetValue(),
+	}
+}
