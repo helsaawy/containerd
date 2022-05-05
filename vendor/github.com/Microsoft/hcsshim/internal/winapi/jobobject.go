@@ -1,3 +1,5 @@
+//go:build windows
+
 package winapi
 
 import (
@@ -52,6 +54,7 @@ const (
 	JobObjectLimitViolationInformation       uint32 = 13
 	JobObjectMemoryUsageInformation          uint32 = 28
 	JobObjectNotificationLimitInformation2   uint32 = 33
+	JobObjectCreateSilo                      uint32 = 35
 	JobObjectIoAttribution                   uint32 = 42
 )
 
@@ -93,7 +96,7 @@ type JOBOBJECT_BASIC_PROCESS_ID_LIST struct {
 
 // AllPids returns all the process Ids in the job object.
 func (p *JOBOBJECT_BASIC_PROCESS_ID_LIST) AllPids() []uintptr {
-	return (*[(1 << 27) - 1]uintptr)(unsafe.Pointer(&p.ProcessIdList[0]))[:p.NumberOfProcessIdsInList]
+	return (*[(1 << 27) - 1]uintptr)(unsafe.Pointer(&p.ProcessIdList[0]))[:p.NumberOfProcessIdsInList:p.NumberOfProcessIdsInList]
 }
 
 // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information
@@ -195,6 +198,7 @@ type JOBOBJECT_ASSOCIATE_COMPLETION_PORT struct {
 //		JOBOBJECT_IO_RATE_CONTROL_INFORMATION **InfoBlocks,
 // 		ULONG                                 *InfoBlockCount
 // );
+//
 //sys QueryIoRateControlInformationJobObject(jobHandle windows.Handle, volumeName *uint16, ioRateControlInfo **JOBOBJECT_IO_RATE_CONTROL_INFORMATION, infoBlockCount *uint32) (ret uint32, err error) = kernel32.QueryIoRateControlInformationJobObject
 
 // NTSTATUS
@@ -203,6 +207,7 @@ type JOBOBJECT_ASSOCIATE_COMPLETION_PORT struct {
 //     _In_ ACCESS_MASK DesiredAccess,
 //     _In_ POBJECT_ATTRIBUTES ObjectAttributes
 // );
+//
 //sys NtOpenJobObject(jobHandle *windows.Handle, desiredAccess uint32, objAttributes *ObjectAttributes) (status uint32) = ntdll.NtOpenJobObject
 
 // NTSTATUS
@@ -212,4 +217,5 @@ type JOBOBJECT_ASSOCIATE_COMPLETION_PORT struct {
 //     _In_ ACCESS_MASK DesiredAccess,
 //     _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes
 // );
+//
 //sys NtCreateJobObject(jobHandle *windows.Handle, desiredAccess uint32, objAttributes *ObjectAttributes) (status uint32) = ntdll.NtCreateJobObject

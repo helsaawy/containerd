@@ -17,8 +17,7 @@
 package main
 
 import (
-	_ "github.com/containerd/containerd/diff/lcow"
-	_ "github.com/containerd/containerd/diff/windows"
+	_ "github.com/containerd/containerd/diff/windows/plugin"
 	_ "github.com/containerd/containerd/snapshots/lcow"
 	_ "github.com/containerd/containerd/snapshots/wcow"
 )
