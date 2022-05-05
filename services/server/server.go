@@ -127,6 +127,7 @@ func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
 		return nil, err
 	}
 	for id, p := range config.StreamProcessors {
+		log.G(ctx).Infof("registering processor %q", id)
 		diff.RegisterProcessor(diff.BinaryHandler(id, p.Returns, p.Accepts, p.Path, p.Args, p.Env))
 	}
 

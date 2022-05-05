@@ -28,73 +28,53 @@ import (
 	"time"
 
 	winio "github.com/Microsoft/go-winio"
+	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/diff"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/metadata"
 	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/plugin"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
+
+	"github.com/Microsoft/hcsshim/cmd/differ/mediatype"
+	"github.com/Microsoft/hcsshim/cmd/differ/payload"
 )
 
-func init() {
-	plugin.Register(&plugin.Registration{
-		Type: plugin.DiffPlugin,
-		ID:   "windows",
-		Requires: []plugin.Type{
-			plugin.MetadataPlugin,
-		},
-		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
-			md, err := ic.Get(plugin.MetadataPlugin)
-			if err != nil {
-				return nil, err
-			}
-
-			ic.Meta.Platforms = append(ic.Meta.Platforms, platforms.DefaultSpec())
-			return NewWindowsDiff(md.(*metadata.DB).ContentStore())
-		},
-	})
-}
-
-// CompareApplier handles both comparison and
-// application of layer diffs.
-type CompareApplier interface {
-	diff.Applier
-	diff.Comparer
-}
-
-// windowsDiff does filesystem comparison and application
+// windowsWCOWDiff does filesystem comparison and application
 // for Windows specific layer diffs.
-type windowsDiff struct {
-	store content.Store
+type windowsWCOWDiff struct {
+	windowsDiffBase
 }
 
-var emptyDesc = ocispec.Descriptor{}
-var uncompressed = "containerd.io/uncompressed"
+var _ containerd.DiffService = windowsWCOWDiff{}
 
-// NewWindowsDiff is the Windows container layer implementation
+// NewWindowsWCOWDiff is the Windows container layer implementation
 // for comparing and applying filesystem layers
-func NewWindowsDiff(store content.Store) (CompareApplier, error) {
-	return windowsDiff{
-		store: store,
+func NewWindowsWCOWDiff(store content.Store) (containerd.DiffService, error) {
+	return windowsWCOWDiff{
+		windowsDiffBase: windowsDiffBase{
+			store:   store,
+			mtExt:   mediatype.ExtensionWCOW,
+			finalMT: mediatype.MediaTypeMicrosoftImageLayerWCLayer,
+			mntType: "windows-layer",
+		},
 	}, nil
 }
 
 // Apply applies the content associated with the provided digests onto the
 // provided mounts. Archive content will be extracted and decompressed if
 // necessary.
-func (s windowsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []mount.Mount, opts ...diff.ApplyOpt) (d ocispec.Descriptor, err error) {
+func (s windowsWCOWDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []mount.Mount, opts ...diff.ApplyOpt) (d ocispec.Descriptor, err error) {
 	t1 := time.Now()
+	ctx = log.WithLogger(ctx, log.G(ctx).WithField("differ", "windowsWCOWDiff"))
 	defer func() {
 		if err == nil {
 			log.G(ctx).WithFields(logrus.Fields{
-				"d":      time.Since(t1),
+				"d":      time.Since(t1).String(),
 				"digest": desc.Digest,
 				"size":   desc.Size,
 				"media":  desc.MediaType,
@@ -102,67 +82,29 @@ func (s windowsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts 
 		}
 	}()
 
-	var config diff.ApplyConfig
-	for _, o := range opts {
-		if err := o(ctx, desc, &config); err != nil {
-			return emptyDesc, fmt.Errorf("failed to apply config opt: %w", err)
-		}
-	}
-
-	ra, err := s.store.ReaderAt(ctx, desc)
-	if err != nil {
-		return emptyDesc, fmt.Errorf("failed to get reader from content store: %w", err)
-	}
-	defer ra.Close()
-
-	processor := diff.NewProcessorChain(desc.MediaType, content.NewReader(ra))
-	for {
-		if processor, err = diff.GetProcessor(ctx, processor, config.ProcessorPayloads); err != nil {
-			return emptyDesc, fmt.Errorf("failed to get stream processor for %s: %w", desc.MediaType, err)
-		}
-		if processor.MediaType() == ocispec.MediaTypeImageLayer {
-			break
-		}
-	}
-	defer processor.Close()
-
-	digester := digest.Canonical.Digester()
-	rc := &readCounter{
-		r: io.TeeReader(processor, digester.Hash()),
-	}
-
-	layer, parentLayerPaths, err := mountsToLayerAndParents(mounts)
+	// quit early if the mount type is not windows-layer
+	layer, parentLayerPaths, err := s.mountsToLayerAndParents(mounts)
 	if err != nil {
 		return emptyDesc, err
 	}
 
-	// TODO darrenstahlmsft: When this is done isolated, we should disable these.
-	// it currently cannot be disabled, unless we add ref counting. Since this is
-	// temporary, leaving it enabled is OK for now.
-	// https://github.com/containerd/containerd/issues/1681
-	if err := winio.EnableProcessPrivileges([]string{winio.SeBackupPrivilege, winio.SeRestorePrivilege}); err != nil {
-		return emptyDesc, err
+	o := func(_ context.Context, _ ocispec.Descriptor, c *diff.ApplyConfig) error {
+		wclayerOpts := payload.WCLayerImportOptions{
+			RootPath: layer,
+			Parents:  parentLayerPaths,
+		}
+		if c.ProcessorPayloads[wcowWCLayerID], err = wclayerOpts.ToAny(); err != nil {
+			return fmt.Errorf("failed to marshal payload %T: %w", wclayerOpts, err)
+		}
+		return nil
 	}
 
-	if _, err := archive.Apply(ctx, layer, rc, archive.WithParents(parentLayerPaths), archive.AsWindowsContainerLayer()); err != nil {
-		return emptyDesc, err
-	}
-
-	// Read any trailing data
-	if _, err := io.Copy(io.Discard, rc); err != nil {
-		return emptyDesc, err
-	}
-
-	return ocispec.Descriptor{
-		MediaType: ocispec.MediaTypeImageLayer,
-		Size:      rc.c,
-		Digest:    digester.Digest(),
-	}, nil
+	return s.applyCommon(ctx, desc, mounts, append(opts, o)...)
 }
 
 // Compare creates a diff between the given mounts and uploads the result
 // to the content store.
-func (s windowsDiff) Compare(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (d ocispec.Descriptor, err error) {
+func (s windowsWCOWDiff) Compare(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (d ocispec.Descriptor, err error) {
 	t1 := time.Now()
 
 	var config diff.Config
@@ -172,7 +114,7 @@ func (s windowsDiff) Compare(ctx context.Context, lower, upper []mount.Mount, op
 		}
 	}
 
-	layers, err := mountPairToLayerStack(lower, upper)
+	layers, err := s.mountPairToLayerStack(lower, upper)
 	if err != nil {
 		return emptyDesc, err
 	}
@@ -295,78 +237,46 @@ func (s windowsDiff) Compare(ctx context.Context, lower, upper []mount.Mount, op
 	return desc, nil
 }
 
-type readCounter struct {
-	r io.Reader
-	c int64
-}
-
-func (rc *readCounter) Read(p []byte) (n int, err error) {
-	n, err = rc.r.Read(p)
-	rc.c += int64(n)
-	return
-}
-
-func mountsToLayerAndParents(mounts []mount.Mount) (string, []string, error) {
-	if len(mounts) != 1 {
-		return "", nil, fmt.Errorf("number of mounts should always be 1 for Windows layers: %w", errdefs.ErrInvalidArgument)
-	}
-	mnt := mounts[0]
-	if mnt.Type != "windows-layer" {
-		// This is a special case error. When this is received the diff service
-		// will attempt the next differ in the chain which for Windows is the
-		// lcow differ that we want.
-		return "", nil, fmt.Errorf("windowsDiff does not support layer type %s: %w", mnt.Type, errdefs.ErrNotImplemented)
-	}
-
-	parentLayerPaths, err := mnt.GetParentPaths()
-	if err != nil {
-		return "", nil, err
-	}
-
-	return mnt.Source, parentLayerPaths, nil
-}
-
-// mountPairToLayerStack ensures that the two sets of mount-lists are actually a correct
+// wcowMountPairToLayerStack ensures that the two sets of mount-lists are actually a correct
 // parent-and-child, or orphan-and-empty-list, and return the full list of layers, starting
 // with the upper-most (most childish?)
-func mountPairToLayerStack(lower, upper []mount.Mount) ([]string, error) {
-
+func (s *windowsWCOWDiff) mountPairToLayerStack(lower, upper []mount.Mount) ([]string, error) {
 	// May return an ErrNotImplemented, which will fall back to LCOW
-	upperLayer, upperParentLayerPaths, err := mountsToLayerAndParents(upper)
+	upperLayer, upperParentLayerPaths, err := s.mountsToLayerAndParents(upper)
 	if err != nil {
-		return nil, fmt.Errorf("Upper mount invalid: %w", err)
+		return nil, fmt.Errorf("upper mount invalid: %w", err)
 	}
 
 	// Trivial case, diff-against-nothing
 	if len(lower) == 0 {
 		if len(upperParentLayerPaths) != 0 {
-			return nil, fmt.Errorf("windowsDiff cannot diff a layer with parents against a null layer: %w", errdefs.ErrInvalidArgument)
+			return nil, fmt.Errorf("windowsWCOWDiff cannot diff a layer with parents against a null layer: %w", errdefs.ErrInvalidArgument)
 		}
 		return []string{upperLayer}, nil
 	}
 
 	if len(upperParentLayerPaths) < 1 {
-		return nil, fmt.Errorf("windowsDiff cannot diff a layer with no parents against another layer: %w", errdefs.ErrInvalidArgument)
+		return nil, fmt.Errorf("windowsWCOWDiff cannot diff a layer with no parents against another layer: %w", errdefs.ErrInvalidArgument)
 	}
 
-	lowerLayer, lowerParentLayerPaths, err := mountsToLayerAndParents(lower)
+	lowerLayer, lowerParentLayerPaths, err := s.mountsToLayerAndParents(lower)
 	if errdefs.IsNotImplemented(err) {
 		// Upper was a windows-layer, lower is not. We can't handle that.
-		return nil, fmt.Errorf("windowsDiff cannot diff a windows-layer against a non-windows-layer: %w", errdefs.ErrInvalidArgument)
+		return nil, fmt.Errorf("windowsWCOWDiff cannot diff a windows-layer against a non-windows-layer: %w", errdefs.ErrInvalidArgument)
 	} else if err != nil {
 		return nil, fmt.Errorf("Lower mount invalid: %w", err)
 	}
 
 	if upperParentLayerPaths[0] != lowerLayer {
-		return nil, fmt.Errorf("windowsDiff cannot diff a layer against a layer other than its own parent: %w", errdefs.ErrInvalidArgument)
+		return nil, fmt.Errorf("windowsWCOWDiff cannot diff a layer against a layer other than its own parent: %w", errdefs.ErrInvalidArgument)
 	}
 
 	if len(upperParentLayerPaths) != len(lowerParentLayerPaths)+1 {
-		return nil, fmt.Errorf("windowsDiff cannot diff a layer against a layer with different parents: %w", errdefs.ErrInvalidArgument)
+		return nil, fmt.Errorf("windowsWCOWDiff cannot diff a layer against a layer with different parents: %w", errdefs.ErrInvalidArgument)
 	}
 	for i, upperParent := range upperParentLayerPaths[1:] {
 		if upperParent != lowerParentLayerPaths[i] {
-			return nil, fmt.Errorf("windowsDiff cannot diff a layer against a layer with different parents: %w", errdefs.ErrInvalidArgument)
+			return nil, fmt.Errorf("windowsWCOWDiff cannot diff a layer against a layer with different parents: %w", errdefs.ErrInvalidArgument)
 		}
 	}
 
