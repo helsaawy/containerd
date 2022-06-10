@@ -40,6 +40,7 @@ func NewBinaryProcessor(ctx context.Context, imt, rmt string, stream StreamProce
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, env...)
+	cmd.Env = append(cmd.Env, "STREAM_PROCESSOR_LOG_LEVEL=DEBUG")
 
 	if payload != nil {
 		data, err := proto.Marshal(payload)
@@ -135,6 +136,7 @@ func (c *binaryProcessor) wait() {
 			c.mu.Lock()
 			c.err = errors.New(c.stderr.String())
 			c.mu.Unlock()
+			logrus.WithError(err).Warningf("cmd failed %q", c.cmd.String())
 		}
 	}
 	close(c.done)

@@ -3,9 +3,6 @@
 package payload
 
 import (
-	"fmt"
-
-	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/typeurl"
 	"github.com/gogo/protobuf/types"
 
@@ -28,50 +25,62 @@ type Tar2Ext4Options struct {
 	VHDPath string
 }
 
-var _ FromAny = &Tar2Ext4Options{}
+var _ Payload = &Tar2Ext4Options{}
 
-func (o *Tar2Ext4Options) ToAny() (*types.Any, error) {
-	a, err := typeurl.MarshalAny(o)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal Tar2Ext4Options: %w", err)
-	}
-	return a, nil
+func (p *Tar2Ext4Options) ToAny() (*types.Any, error) {
+	return toAny(p)
 }
 
-func (o *Tar2Ext4Options) FromAny(a *types.Any) error {
-	v, err := typeurl.UnmarshalAny(a)
-	if err != nil || v == nil {
-		return fmt.Errorf("unmarshal Tar2Ext4Options: %w", err)
-	}
-
-	oo, ok := v.(*Tar2Ext4Options)
-	if !ok {
-		return fmt.Errorf("payload type is %T, not Tar2Ext4Options: %w", v, errdefs.ErrInvalidArgument)
-	}
-	*o = *oo
-	return nil
+func (p *Tar2Ext4Options) FromAny(a *types.Any) error {
+	return fromAny(p, a)
 }
 
-func (o *Tar2Ext4Options) Options() []tar2ext4.Option {
+func (p *Tar2Ext4Options) Files() []string {
+	return []string{p.VHDPath}
+}
+
+// func (p *Tar2Ext4Options) ToAny() (*types.Any, error) {
+// 	a, err := typeurl.MarshalAny(p)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to marshal Tar2Ext4Options: %w", err)
+// 	}
+// 	return a, nil
+// }
+
+// func (p *Tar2Ext4Options) FromAny(a *types.Any) error {
+// 	v, err := typeurl.UnmarshalAny(a)
+// 	if err != nil || v == nil {
+// 		return fmt.Errorf("unmarshal Tar2Ext4Options: %w", err)
+// 	}
+
+// 	pp, ok := v.(*Tar2Ext4Options)
+// 	if !ok {
+// 		return fmt.Errorf("payload type is %T, not Tar2Ext4Options: %w", v, errdefs.ErrInvalidArgument)
+// 	}
+// 	*p = *pp
+// 	return nil
+// }
+
+func (p *Tar2Ext4Options) Options() []tar2ext4.Option {
 	opts := make([]tar2ext4.Option, 0, 5)
-	if o == nil {
+	if p == nil {
 		return opts
 	}
 
-	if o.ConvertWhiteout {
+	if p.ConvertWhiteout {
 		opts = append(opts, tar2ext4.ConvertWhiteout)
 	}
-	if o.AppendVhdFooter {
+	if p.AppendVhdFooter {
 		opts = append(opts, tar2ext4.AppendVhdFooter)
 	}
-	if o.AppendDMVerity {
+	if p.AppendDMVerity {
 		opts = append(opts, tar2ext4.AppendDMVerity)
 	}
-	if o.InlineData {
+	if p.InlineData {
 		opts = append(opts, tar2ext4.InlineData)
 	}
-	if o.MaximumDiskSize != 0 {
-		opts = append(opts, tar2ext4.MaximumDiskSize(o.MaximumDiskSize))
+	if p.MaximumDiskSize != 0 {
+		opts = append(opts, tar2ext4.MaximumDiskSize(p.MaximumDiskSize))
 	}
 
 	return opts

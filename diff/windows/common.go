@@ -102,9 +102,6 @@ func (s *windowsDiffBase) applyCommon(ctx context.Context, desc ocispec.Descript
 			"mtvhd":   finalMT,
 		}).Debug("using isolated processors")
 	}
-	log.G(ctx).WithFields(logrus.Fields{
-		"desc": fmt.Sprintf("%#+v", desc),
-	}).Info("lcow apply")
 
 	ra, err := s.store.ReaderAt(ctx, desc)
 	if err != nil {
@@ -175,11 +172,17 @@ func (s *windowsDiffBase) applyCommon(ctx context.Context, desc ocispec.Descript
 		// wait should ruetrn the exit error, so only do one or the other
 		if wp, ok := p.(waitProcessor); ok {
 			if err := wp.Wait(ctx); err != nil {
-				perrs = append(perrs, fmt.Errorf("processor %s: %w", p.MediaType(), err).Error())
+				eerr := fmt.Errorf("processor %s: %w", p.MediaType(), err)
+				log.G(ctx).WithError(err).Warning("wait processor")
+				perrs = append(perrs, eerr.Error())
+				// perrs = append(perrs, fmt.Errorf("wait processor %s: %w", p.MediaType(), err).Error())
 			}
 		} else if ep, ok := p.(errorProcessor); ok {
 			if err := ep.Err(); err != nil {
-				perrs = append(perrs, fmt.Errorf("processor %s: %w", p.MediaType(), err).Error())
+				eerr := fmt.Errorf("processor %s: %w", p.MediaType(), err)
+				log.G(ctx).WithError(err).Warning("wait processor")
+				perrs = append(perrs, eerr.Error())
+				// perrs = append(perrs, fmt.Errorf("processor %s: %w", p.MediaType(), err).Error())
 			}
 		}
 	}

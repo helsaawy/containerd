@@ -104,7 +104,6 @@ func (s *windowsLCOWDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mo
 			MaximumDiskSize: maxLCOWVhdSizeGB,
 			VHDPath:         vhd.Name(),
 		}
-
 		opts.AppendDMVerity, _ = parseBoolPayload(c.ProcessorPayloads[LCOWLayerIntegrityEnabled])
 		if c.ProcessorPayloads[lcowTar2Ext4ID], err = opts.ToAny(); err != nil {
 			return fmt.Errorf("failed to marshal payload %T: %w", opts, err)

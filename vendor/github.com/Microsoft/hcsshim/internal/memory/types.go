@@ -5,7 +5,8 @@ import "github.com/pkg/errors"
 type classType uint32
 
 const (
-	MiB = 1024 * 1024
+	KiB = 1024
+	MiB = 1024 * KiB
 	GiB = 1024 * MiB
 )
 

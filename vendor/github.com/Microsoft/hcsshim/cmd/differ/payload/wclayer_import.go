@@ -3,9 +3,6 @@
 package payload
 
 import (
-	"fmt"
-
-	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/typeurl"
 	"github.com/gogo/protobuf/types"
 )
@@ -20,24 +17,38 @@ type WCLayerImportOptions struct {
 	Parents  []string
 }
 
-func (o *WCLayerImportOptions) ToAny() (*types.Any, error) {
-	a, err := typeurl.MarshalAny(o)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal Tar2Ext4Options: %w", err)
-	}
-	return a, nil
+var _ Payload = &WCLayerImportOptions{}
+
+func (p *WCLayerImportOptions) ToAny() (*types.Any, error) {
+	return toAny(p)
 }
 
-func (o *WCLayerImportOptions) FromAny(a *types.Any) error {
-	v, err := typeurl.UnmarshalAny(a)
-	if err != nil || v == nil {
-		return fmt.Errorf("unmarshal WCLayerImportOptions: %w", err)
-	}
-
-	oo, ok := v.(*WCLayerImportOptions)
-	if !ok {
-		return fmt.Errorf("payload type is %T, not WCLayerImportOptions: %w", v, errdefs.ErrInvalidArgument)
-	}
-	*o = *oo
-	return nil
+func (p *WCLayerImportOptions) FromAny(a *types.Any) error {
+	return fromAny(p, a)
 }
+
+func (p *WCLayerImportOptions) Files() []string {
+	return append(p.Parents, p.RootPath)
+}
+
+// func (p *WCLayerImportOptions) ToAny() (*types.Any, error) {
+// 	a, err := typeurl.MarshalAny(p)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to marshal Tar2Ext4Options: %w", err)
+// 	}
+// 	return a, nil
+// }
+
+// func (p *WCLayerImportOptions) FromAny(a *types.Any) error {
+// 	v, err := typeurl.UnmarshalAny(a)
+// 	if err != nil || v == nil {
+// 		return fmt.Errorf("unmarshal WCLayerImportOptions: %w", err)
+// 	}
+
+// 	pp, ok := v.(*WCLayerImportOptions)
+// 	if !ok {
+// 		return fmt.Errorf("payload type is %T, not WCLayerImportOptions: %w", v, errdefs.ErrInvalidArgument)
+// 	}
+// 	*p = *pp
+// 	return nil
+// }

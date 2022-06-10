@@ -89,12 +89,12 @@ func (s windowsWCOWDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mou
 	}
 
 	o := func(_ context.Context, _ ocispec.Descriptor, c *diff.ApplyConfig) error {
-		wclayerOpts := payload.WCLayerImportOptions{
+		opts := payload.WCLayerImportOptions{
 			RootPath: layer,
 			Parents:  parentLayerPaths,
 		}
-		if c.ProcessorPayloads[wcowWCLayerID], err = wclayerOpts.ToAny(); err != nil {
-			return fmt.Errorf("failed to marshal payload %T: %w", wclayerOpts, err)
+		if c.ProcessorPayloads[wcowWCLayerID], err = opts.ToAny(); err != nil {
+			return fmt.Errorf("failed to marshal payload %T: %w", opts, err)
 		}
 		return nil
 	}
