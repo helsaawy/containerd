@@ -20,19 +20,14 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/url"
-	"time"
 
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plugin"
+	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 )
 
@@ -44,14 +39,15 @@ func init() {
 		Type:   plugin.TracingProcessorPlugin,
 		Config: &OTLPConfig{},
 		InitFn: func(ic *plugin.InitContext) (interface{}, error) {
-			cfg := ic.Config.(*OTLPConfig)
-			if cfg.Endpoint == "" {
-				return nil, fmt.Errorf("no OpenTelemetry endpoint: %w", plugin.ErrSkipPlugin)
-			}
-			exp, err := newExporter(ic.Context, cfg)
-			if err != nil {
-				return nil, err
-			}
+			// cfg := ic.Config.(*OTLPConfig)
+			// if cfg.Endpoint == "" {
+			// 	return nil, fmt.Errorf("no OpenTelemetry endpoint: %w", plugin.ErrSkipPlugin)
+			// }
+			// exp, err := newExporter(ic.Context, cfg)
+			// if err != nil {
+			// 	return nil, err
+			// }
+			exp := newExporter()
 			return trace.NewBatchSpanProcessor(exp), nil
 		},
 	})
@@ -87,40 +83,59 @@ func (c *closer) Close() error {
 	return c.close()
 }
 
-// newExporter creates an exporter based on the given configuration.
-//
-// The default protocol is http/protobuf since it is recommended by
-// https://github.com/open-telemetry/opentelemetry-specification/blob/v1.8.0/specification/protocol/exporter.md#specify-protocol.
-func newExporter(ctx context.Context, cfg *OTLPConfig) (*otlptrace.Exporter, error) {
-	const timeout = 5 * time.Second
+type LogrusExporter struct{}
 
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+var _ trace.SpanExporter = &LogrusExporter{}
 
-	if cfg.Protocol == "http/protobuf" || cfg.Protocol == "" {
-		u, err := url.Parse(cfg.Endpoint)
-		if err != nil {
-			return nil, fmt.Errorf("OpenTelemetry endpoint %q is invalid: %w", cfg.Endpoint, err)
-		}
-		opts := []otlptracehttp.Option{
-			otlptracehttp.WithEndpoint(u.Host),
-		}
-		if u.Scheme == "http" {
-			opts = append(opts, otlptracehttp.WithInsecure())
-		}
-		return otlptracehttp.New(ctx, opts...)
-	} else if cfg.Protocol == "grpc" {
-		opts := []otlptracegrpc.Option{
-			otlptracegrpc.WithEndpoint(cfg.Endpoint),
-		}
-		if cfg.Insecure {
-			opts = append(opts, otlptracegrpc.WithInsecure())
-		}
-		return otlptracegrpc.New(ctx, opts...)
-	} else {
-		// Other protocols such as "http/json" are not supported.
-		return nil, fmt.Errorf("OpenTelemetry protocol %q is not supported", cfg.Protocol)
+func newExporter() trace.SpanExporter {
+	return &LogrusExporter{}
+}
+
+func (e *LogrusExporter) ExportSpans(ctx context.Context, spans []trace.ReadOnlySpan) error {
+	for _, span := range spans {
+		go func(span trace.ReadOnlySpan) {
+			entry := log.L.Dup()
+			attrs := span.Attributes()
+			data := make(logrus.Fields, len(entry.Data)+len(attrs)+10)
+
+			for k, v := range entry.Data {
+				data[k] = v
+			}
+			for _, kv := range attrs {
+				if v, err := kv.Value.MarshalJSON(); err == nil {
+					data[string(kv.Key)] = string(v)
+				}
+			}
+
+			sc := span.SpanContext()
+			data["name"] = span.Name()
+			data["traceID"] = sc.TraceID().String()
+			data["SpanID"] = sc.SpanID().String()
+			data["ParentSpanID"] = span.Parent().SpanID().String()
+			data["StartTime"] = span.StartTime().Format(log.RFC3339NanoFixed)
+			data["EndTime"] = span.EndTime().Format(log.RFC3339NanoFixed)
+			data["Duration"] = span.EndTime().Sub(span.StartTime())
+
+			level := logrus.InfoLevel
+			if st := span.Status(); st.Code != 0 {
+				level = logrus.ErrorLevel
+
+				// don't overwrite an existing "error"
+				if _, ok := data[logrus.ErrorKey]; !ok {
+					data[logrus.ErrorKey] = st.Description
+				}
+			}
+
+			entry.Data = data
+			entry.Time = span.StartTime()
+			entry.Log(level, "Span")
+		}(span)
 	}
+	return nil
+}
+
+func (e *LogrusExporter) Shutdown(ctx context.Context) error {
+	return nil
 }
 
 // newTracer configures protocol-agonostic tracing settings such as
@@ -141,9 +156,9 @@ func newTracer(ic *plugin.InitContext) (io.Closer, error) {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
-	opts := []sdktrace.TracerProviderOption{
-		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(config.TraceSamplingRatio)),
-		sdktrace.WithResource(res),
+	opts := []trace.TracerProviderOption{
+		trace.WithSampler(trace.TraceIDRatioBased(config.TraceSamplingRatio)),
+		trace.WithResource(res),
 	}
 
 	ls, err := ic.GetByType(plugin.TracingProcessorPlugin)
@@ -151,19 +166,19 @@ func newTracer(ic *plugin.InitContext) (io.Closer, error) {
 		return nil, fmt.Errorf("failed to get tracing processors: %w", err)
 	}
 
-	procs := make([]sdktrace.SpanProcessor, 0, len(ls))
+	procs := make([]trace.SpanProcessor, 0, len(ls))
 	for id, pctx := range ls {
 		p, err := pctx.Instance()
 		if err != nil {
 			log.G(ctx).WithError(err).Errorf("failed to initialize a tracing processor %q", id)
 			continue
 		}
-		proc := p.(sdktrace.SpanProcessor)
-		opts = append(opts, sdktrace.WithSpanProcessor(proc))
+		proc := p.(trace.SpanProcessor)
+		opts = append(opts, trace.WithSpanProcessor(proc))
 		procs = append(procs, proc)
 	}
 
-	provider := sdktrace.NewTracerProvider(opts...)
+	provider := trace.NewTracerProvider(opts...)
 
 	otel.SetTracerProvider(provider)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
