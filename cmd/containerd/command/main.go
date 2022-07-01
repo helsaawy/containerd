@@ -35,7 +35,6 @@ import (
 	"github.com/containerd/containerd/services/server"
 	srvconfig "github.com/containerd/containerd/services/server/config"
 	"github.com/containerd/containerd/sys"
-	"github.com/containerd/containerd/tracing"
 	"github.com/containerd/containerd/version"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
@@ -370,7 +369,7 @@ func setLogFormat(config *srvconfig.Config) error {
 }
 
 func setLogHooks() {
-	logrus.StandardLogger().AddHook(tracing.NewLogrusHook())
+	// logrus.StandardLogger().AddHook(tracing.NewLogrusHook())
 }
 
 func dumpStacks(writeToFile bool) {
